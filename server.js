@@ -25,20 +25,18 @@ const razorpay = new Razorpay({
 
 // ==========================================
 // ==========================================
-// EMAIL TRANSPORTER SETUP (FIXED FOR RENDER IPv4)
+// ==========================================
+// EMAIL TRANSPORTER SETUP (FORCED IPv4)
 // ==========================================
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
   host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // port 587 ke liye false rakhte hain
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
   },
-  tls: {
-    rejectUnauthorized: false
-  }
+  family: 4 // Yeh line Render par IPv6 error ko aane se rok degi (Forces IPv4)
 });
 
 const formatStr = (dateObj) => {
