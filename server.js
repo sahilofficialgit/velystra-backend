@@ -1,4 +1,8 @@
 // server.js
+
+const dns = require('dns');
+dns.setServers(['8.8.8.8', '8.8.4.4']); // Google DNS force karo
+
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -28,17 +32,24 @@ const razorpay = new Razorpay({
 });
 
 // ==========================================
-// EMAIL TRANSPORTER SETUP (FIXED FOR RENDER IPv4)
+// ==========================================
+// FINAL HARDCORE FIX: NO DNS LOOKUP
 // ==========================================
 const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
+  host: '142.250.138.109', // Gmail ka hardcoded IPv4 IP
   port: 465,
   secure: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
   },
-  family: 4
+  tls: {
+    rejectUnauthorized: false,
+    servername: 'smtp.gmail.com' // SSL validation ke liye
+  },
+  // IPv6 ko disable karne ka final try
+  socketTimeout: 10000,
+  connectionTimeout: 10000,
 });
 
 const formatStr = (dateObj) => {
