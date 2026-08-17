@@ -312,7 +312,7 @@ app.post('/api/apply', async (req, res) => {
         </div>
         <p>You can download your official internship offer letter directly from our portal using your Registration ID:</p>
         <div style="margin: 25px 0;">
-          <a href="https://your-website.com/offer-letter?regId=${regId}" 
+          <a href="https://velystra-technology.vercel.app/offer-letter?regId=${regId}" 
              style="background: #0A192F; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
              📥 Download Offer Letter
           </a>
