@@ -4,7 +4,6 @@ const cors = require('cors');
 const { google } = require('googleapis');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 require('dotenv').config();
 
@@ -14,7 +13,7 @@ app.use(express.json());
 
 // Google Sheets Setup
 const auth = new google.auth.GoogleAuth({
-  keyFile: 'credentials.json', 
+  keyFile: 'credentials.json',
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 
@@ -24,17 +23,38 @@ const razorpay = new Razorpay({
 });
 
 // ==========================================
-// EMAIL TRANSPORTER SETUP (BREVO SMTP)
+// BREVO HTTPS REST API HELPER (100% BYPASSES SMTP BLOCKS)
 // ==========================================
-const transporter = nodemailer.createTransport({
-  host: 'smtp-relay.brevo.com',
-  port: 465,
-  secure: true,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
+async function sendBrevoEmail(toEmail, toName, subject, htmlContent) {
+  try {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'accept': 'application/json',
+        'api-key': process.env.BREVO_API_KEY,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        sender: {
+          name: 'Velystra Technology',
+          email: process.env.EMAIL_USER,
+        },
+        to: [{ email: toEmail, name: toName || toEmail }],
+        subject: subject,
+        htmlContent: htmlContent,
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('Brevo API Failed:', data);
+    } else {
+      console.log('Email sent successfully via Brevo API to:', toEmail);
+    }
+  } catch (error) {
+    console.error('Brevo API Request Error:', error);
   }
-});
+}
 
 const formatStr = (dateObj) => {
   const dd = String(dateObj.getDate()).padStart(2, '0');
@@ -43,18 +63,20 @@ const formatStr = (dateObj) => {
   return `${dd}/${mm}/${yyyy}`;
 };
 
-// 1. Status Check API (STRICT FIX)
+// ==========================================
+// 1. STATUS CHECK API
+// ==========================================
 app.get('/api/check-status/:regId', async (req, res) => {
   try {
     const regIdToCheck = req.params.regId.replace(/-/g, '').toUpperCase();
     const spreadsheetId = process.env.SPREADSHEET_ID;
-    
+
     const client = await auth.getClient();
     const sheets = google.sheets({ version: 'v4', auth: client });
 
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: 'Form Responses 1!A:L', 
+      range: 'Form Responses 1!A:L',
     });
 
     const rows = response.data.values;
@@ -66,7 +88,7 @@ app.get('/api/check-status/:regId', async (req, res) => {
 
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
-      if (row[5] && row[5].replace(/-/g, '').toUpperCase() === regIdToCheck) { 
+      if (row[5] && row[5].replace(/-/g, '').toUpperCase() === regIdToCheck) {
         userFound = true;
         const taskStatus = row[6] ? row[6].toString().trim().toLowerCase() : '';
         if (taskStatus === 'done') isCompleted = true;
@@ -74,16 +96,16 @@ app.get('/api/check-status/:regId', async (req, res) => {
         const rawCertId = row[10] ? row[10].toString().trim() : '';
         const validCertId = rawCertId.startsWith('VTCC') ? rawCertId : '';
 
-        userData = { 
-          name: row[1], 
-          email: row[2], 
-          domain: row[4], 
+        userData = {
+          name: row[1],
+          email: row[2],
+          domain: row[4],
           status: taskStatus,
-          duration: row[7] || '1 Month', 
-          startDate: row[8] || '', 
+          duration: row[7] || '1 Month',
+          startDate: row[8] || '',
           endDate: row[9] || '',
-          certId: validCertId, 
-          issueDate: row[11] || ''
+          certId: validCertId,
+          issueDate: row[11] || '',
         };
         break;
       }
@@ -92,69 +114,71 @@ app.get('/api/check-status/:regId', async (req, res) => {
     if (!userFound) return res.status(404).json({ success: false, message: 'Registration ID not found.' });
     return res.json({ success: true, isCompleted, message: isCompleted ? 'Internship Completed!' : 'Tasks Pending', user: userData });
   } catch (error) {
-    console.error("Check Status Error:", error);
+    console.error('Check Status Error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
 // ==========================================
-// 2. SECURE Create Order API (HACKER-PROOF) 🚨
+// 2. SECURE CREATE ORDER API
 // ==========================================
 app.post('/api/create-order', async (req, res) => {
   try {
     const { regId, deliveryOption } = req.body;
     const cleanRegId = regId.replace(/-/g, '').toUpperCase();
-    
+
     const spreadsheetId = process.env.SPREADSHEET_ID;
     const client = await auth.getClient();
     const sheets = google.sheets({ version: 'v4', auth: client });
     const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Form Responses 1!A:J' });
     const rows = response.data.values;
 
-    let userDuration = '1 Month'; 
+    let userDuration = '1 Month';
     let userFound = false;
 
     for (let i = 1; i < rows.length; i++) {
       if (rows[i][5] && rows[i][5].replace(/-/g, '').toUpperCase() === cleanRegId) {
-        userDuration = rows[i][7] || '1 Month'; 
+        userDuration = rows[i][7] || '1 Month';
         userFound = true;
         break;
       }
     }
 
-    if (!userFound) return res.status(404).json({ success: false, message: "User not found" });
+    if (!userFound) return res.status(404).json({ success: false, message: 'User not found' });
 
     let finalAmount = 150;
-    if (userDuration.includes("3")) {
+    if (userDuration.includes('3')) {
       finalAmount = deliveryOption === 'printed' ? 450 : 300;
-    } else if (userDuration.includes("6")) {
+    } else if (userDuration.includes('6')) {
       finalAmount = deliveryOption === 'printed' ? 700 : 500;
     } else {
       finalAmount = deliveryOption === 'printed' ? 299 : 150;
     }
 
-    const options = { 
-      amount: finalAmount * 100, 
-      currency: "INR", 
-      receipt: `receipt_${cleanRegId}` 
+    const options = {
+      amount: finalAmount * 100,
+      currency: 'INR',
+      receipt: `receipt_${cleanRegId}`,
     };
     const order = await razorpay.orders.create(options);
-    if (!order) return res.status(500).json({ success: false, message: "Order creation failed" });
-    
+    if (!order) return res.status(500).json({ success: false, message: 'Order creation failed' });
+
     res.json({ success: true, order });
   } catch (error) {
-    console.error("Secure Order Creation Error:", error);
+    console.error('Secure Order Creation Error:', error);
     res.status(500).json({ success: false, message: 'Server error during payment creation' });
   }
 });
 
-// 3. Payment Verify API (UPDATED WITH COURIER ADMIN EMAIL)
+// ==========================================
+// 3. PAYMENT VERIFY API (WITH ADMIN EMAIL VIA BREVO API)
+// ==========================================
 app.post('/api/verify-payment', async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, regId, deliveryOption, address } = req.body;
     const cleanRegId = regId.replace(/-/g, '').toUpperCase();
-    
-    const body = razorpay_order_id + "|" + razorpay_payment_id;
+
+    const body = razorpay_order_id + '|' + razorpay_payment_id;
     const expectedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(body.toString()).digest('hex');
 
     if (expectedSignature === razorpay_signature) {
@@ -170,77 +194,77 @@ app.post('/api/verify-payment', async (req, res) => {
       for (let i = 1; i < rows.length; i++) {
         if (rows[i][5] && rows[i][5].replace(/-/g, '').toUpperCase() === cleanRegId) {
           rowIndex = i + 1;
-          existingCertId = rows[i][10] || ''; 
+          existingCertId = rows[i][10] || '';
           break;
         }
       }
 
       if (rowIndex !== -1) {
         if (existingCertId && existingCertId.trim() !== '') {
-            return res.json({ success: true, message: "Existing ID used.", certId: existingCertId, issueDate: rows[rowIndex-1][11] });
+          return res.json({ success: true, message: 'Existing ID used.', certId: existingCertId, issueDate: rows[rowIndex - 1][11] });
         }
 
         const year = new Date().getFullYear().toString().slice(-2);
         const random6Digits = Math.floor(100000 + Math.random() * 900000);
-        const newCertId = `VTCC${year}${random6Digits}`; 
-        
-        const internshipEndDate = rows[rowIndex-1][9]; 
+        const newCertId = `VTCC${year}${random6Digits}`;
+
+        const internshipEndDate = rows[rowIndex - 1][9];
         const issueDate = internshipEndDate ? internshipEndDate : new Date().toLocaleDateString('en-GB');
 
         await sheets.spreadsheets.values.update({
-          spreadsheetId, range: `Form Responses 1!K${rowIndex}:L${rowIndex}`,
-          valueInputOption: 'USER_ENTERED', requestBody: { values: [[newCertId, issueDate]] }
+          spreadsheetId,
+          range: `Form Responses 1!K${rowIndex}:L${rowIndex}`,
+          valueInputOption: 'USER_ENTERED',
+          requestBody: { values: [[newCertId, issueDate]] },
         });
 
-        // 📦 AGAR PRINTED HAI TOH ADMIN KO EMAIL BHEJO
+        // 📦 AGAR PRINTED HAI TOH ADMIN KO NOTIFICATION
         if (deliveryOption === 'printed') {
-          const studentName = rows[rowIndex-1][1];
-          const studentEmail = rows[rowIndex-1][2];
-          const studentPhone = rows[rowIndex-1][3];
-          const studentDomain = rows[rowIndex-1][4];
+          const studentName = rows[rowIndex - 1][1];
+          const studentEmail = rows[rowIndex - 1][2];
+          const studentPhone = rows[rowIndex - 1][3];
+          const studentDomain = rows[rowIndex - 1][4];
 
-          const adminMail = {
-            from: `"Velystra System" <${process.env.EMAIL_USER}>`,
-            to: 'velystratechnology@gmail.com',
-            subject: `📦 NEW PRINTED CERTIFICATE ORDER: ${cleanRegId}`,
-            html: `
-              <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-                <h2 style="color: #2563EB;">New Printed Certificate Order! 🚀</h2>
-                <p>A student has successfully paid for a <strong>Printed + Courier</strong> certificate.</p>
-                <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #2563EB; margin: 20px 0;">
-                  <p><strong>Name:</strong> ${studentName}</p>
-                  <p><strong>Email:</strong> ${studentEmail}</p>
-                  <p><strong>Phone (WhatsApp):</strong> ${studentPhone}</p>
-                  <p><strong>Registration ID:</strong> ${cleanRegId}</p>
-                  <p><strong>Domain:</strong> ${studentDomain}</p>
-                  <p><strong>Delivery Address:</strong><br><span style="color: #1e40af; font-size: 16px;">${address || 'Address not provided'}</span></p>
-                </div>
-                <p>Please dispatch the printed certificate to the above address.</p>
+          const adminHtml = `
+            <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+              <h2 style="color: #2563EB;">New Printed Certificate Order! 🚀</h2>
+              <p>A student has successfully paid for a <strong>Printed + Courier</strong> certificate.</p>
+              <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #2563EB; margin: 20px 0;">
+                <p><strong>Name:</strong> ${studentName}</p>
+                <p><strong>Email:</strong> ${studentEmail}</p>
+                <p><strong>Phone (WhatsApp):</strong> ${studentPhone}</p>
+                <p><strong>Registration ID:</strong> ${cleanRegId}</p>
+                <p><strong>Domain:</strong> ${studentDomain}</p>
+                <p><strong>Delivery Address:</strong><br><span style="color: #1e40af; font-size: 16px;">${address || 'Address not provided'}</span></p>
               </div>
-            `
-          };
+              <p>Please dispatch the printed certificate to the above address.</p>
+            </div>
+          `;
 
-          transporter.sendMail(adminMail, (err, info) => {
-            if (err) console.log("Admin email failed:", err);
-            else console.log("Admin courier notification sent:", info.response);
-          });
+          sendBrevoEmail(
+            'velystratechnology@gmail.com',
+            'Velystra Admin',
+            `📦 NEW PRINTED CERTIFICATE ORDER: ${cleanRegId}`,
+            adminHtml
+          );
         }
 
-        res.json({ success: true, message: "Payment verified!", certId: newCertId, issueDate });
+        res.json({ success: true, message: 'Payment verified!', certId: newCertId, issueDate });
       } else {
-         res.json({ success: false, message: "User not found." });
+        res.json({ success: false, message: 'User not found.' });
       }
     } else {
-      res.status(400).json({ success: false, message: "Invalid Signature." });
+      res.status(400).json({ success: false, message: 'Invalid Signature.' });
     }
   } catch (error) {
-    console.error("Payment Verify Error:", error);
+    console.error('Payment Verify Error:', error);
     res.status(500).json({ success: false, message: 'Verification Error' });
   }
 });
 
-
-// 4. NEW APPLICATION FORM API (WITH OFFER LETTER DOWNLOAD LINK)
+// ==========================================
+// 4. APPLICATION FORM API (OFFER LETTER EMAIL VIA BREVO API)
+// ==========================================
 app.post('/api/apply', async (req, res) => {
   try {
     const { name, email, whatsapp, domain, duration } = req.body;
@@ -256,7 +280,7 @@ app.post('/api/apply', async (req, res) => {
 
     const today = new Date();
     const nextMonthFirst = new Date(today.getFullYear(), today.getMonth() + 1, 1);
-    const durationMonths = parseInt(duration.split(' ')[0]) || 1; 
+    const durationMonths = parseInt(duration.split(' ')[0]) || 1;
     const targetEndDate = new Date(today.getFullYear(), today.getMonth() + 1 + durationMonths, 0);
 
     const startDate = formatStr(nextMonthFirst);
@@ -268,60 +292,55 @@ app.post('/api/apply', async (req, res) => {
     const sheets = google.sheets({ version: 'v4', auth: client });
 
     await sheets.spreadsheets.values.append({
-      spreadsheetId, 
-      range: 'Form Responses 1!A:A', 
+      spreadsheetId,
+      range: 'Form Responses 1!A:A',
       valueInputOption: 'USER_ENTERED',
-      insertDataOption: 'INSERT_ROWS', 
-      requestBody: { values: [[ timestamp, name, email, whatsapp, domain, regId, 'Pending', duration, startDate, endDate ]] }
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[timestamp, name, email, whatsapp, domain, regId, 'Pending', duration, startDate, endDate]] },
     });
 
-    // 📩 SENDING WELCOME EMAIL WITH OFFER LETTER DOWNLOAD LINK
-    const mailOptions = {
-      from: `"Velystra Technology" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: 'Welcome & Official Internship Offer Letter - Velystra Technology',
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-          <h2 style="color: #0A192F;">Congratulations, ${name}! 🎉</h2>
-          <p>Your application for the <strong>${domain}</strong> internship has been successfully accepted.</p>
-          <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #0A192F; margin: 20px 0;">
-            <p><strong>Registration ID:</strong> <span style="font-size: 18px; color: #0A192F; font-family: monospace;">${regId}</span></p>
-            <p><strong>Duration:</strong> ${duration}</p>
-            <p><strong>Start Date:</strong> ${startDate}</p>
-            <p><strong>End Date:</strong> ${endDate}</p>
-          </div>
-          <p>You can download your official internship offer letter directly from our portal using your Registration ID:</p>
-          <div style="margin: 25px 0;">
-            <a href="https://your-website.com/offer-letter?regId=${regId}" 
-               style="background: #0A192F; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
-               📥 Download Offer Letter
-            </a>
-          </div>
-          <p>Please keep your Registration ID secure for all task submissions and final certification.</p>
-          <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
+    // 📩 SENDING WELCOME & OFFER LETTER LINK VIA BREVO API
+    const userEmailHtml = `
+      <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+        <h2 style="color: #0A192F;">Congratulations, ${name}! 🎉</h2>
+        <p>Your application for the <strong>${domain}</strong> internship has been successfully accepted.</p>
+        <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #0A192F; margin: 20px 0;">
+          <p><strong>Registration ID:</strong> <span style="font-size: 18px; color: #0A192F; font-family: monospace;">${regId}</span></p>
+          <p><strong>Duration:</strong> ${duration}</p>
+          <p><strong>Start Date:</strong> ${startDate}</p>
+          <p><strong>End Date:</strong> ${endDate}</p>
         </div>
-      `
-    };
+        <p>You can download your official internship offer letter directly from our portal using your Registration ID:</p>
+        <div style="margin: 25px 0;">
+          <a href="https://your-website.com/offer-letter?regId=${regId}" 
+             style="background: #0A192F; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+             📥 Download Offer Letter
+          </a>
+        </div>
+        <p>Please keep your Registration ID secure for all task submissions and final certification.</p>
+        <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
+      </div>
+    `;
 
-    transporter.sendMail(mailOptions, (error, info) => {
-      if (error) console.log("Email sending failed:", error);
-      else console.log("Welcome & Offer Letter Link Email sent:", info.response);
-    });
+    sendBrevoEmail(
+      email,
+      name,
+      'Welcome & Official Internship Offer Letter - Velystra Technology',
+      userEmailHtml
+    );
 
     res.json({ success: true, message: 'Application Submitted!', data: { regId, startDate, endDate, duration } });
-
   } catch (error) {
-    console.error("Apply API Error:", error);
+    console.error('Apply API Error:', error);
     res.status(500).json({ success: false, message: 'Server Error' });
   }
 });
 
-
 // ==========================================
-// 5. THE DAILY CRON JOB (Includes 'Done' Email Notification)
+// 5. DAILY CRON JOB (EMAILS VIA BREVO API)
 // ==========================================
 cron.schedule('0 8 * * *', async () => {
-  console.log("Running Daily Email Automation Check...");
+  console.log('Running Daily Email Automation Check...');
   try {
     const client = await auth.getClient();
     const sheets = google.sheets({ version: 'v4', auth: client });
@@ -349,61 +368,57 @@ cron.schedule('0 8 * * *', async () => {
 
       // Condition 1: Internship Starts Today
       if (startDate === todayStr) {
-        const startMail = {
-          from: `"Velystra Technology" <${process.env.EMAIL_USER}>`,
-          to: email,
-          subject: "🚀 Your Velystra Internship Starts Today!",
-          html: `<p>Hi ${name},</p><p>Welcome aboard! Your internship officially begins today. Keep an eye on your dashboard/tasks.</p>`
-        };
-        transporter.sendMail(startMail);
+        sendBrevoEmail(
+          email,
+          name,
+          '🚀 Your Velystra Internship Starts Today!',
+          `<p>Hi ${name},</p><p>Welcome aboard! Your internship officially begins today. Keep an eye on your dashboard/tasks.</p>`
+        );
       }
 
       // Condition 2: 3 Days Left Reminder
       if (endDate === reminderDateStr) {
-        const reminderMail = {
-          from: `"Velystra Technology" <${process.env.EMAIL_USER}>`,
-          to: email,
-          subject: "⏳ Reminder: 3 Days Left for Submission!",
-          html: `<p>Hi ${name},</p><p>Your internship end date is approaching on <strong>${endDate}</strong>. Please ensure all tasks are submitted to be eligible for your certificate.</p>`
-        };
-        transporter.sendMail(reminderMail);
+        sendBrevoEmail(
+          email,
+          name,
+          '⏳ Reminder: 3 Days Left for Submission!',
+          `<p>Hi ${name},</p><p>Your internship end date is approaching on <strong>${endDate}</strong>. Please ensure all tasks are submitted to be eligible for your certificate.</p>`
+        );
       }
 
-      // Condition 3: Status 'Done' - Send Certificate Unlock Email (Column N tracks it)
+      // Condition 3: Status 'Done' - Send Certificate Unlock Email
       const status = rows[i][6] ? rows[i][6].toString().trim().toLowerCase() : '';
       const emailSentFlag = rows[i][13] ? rows[i][13].toString().trim() : '';
 
       if (status === 'done' && emailSentFlag !== 'Sent') {
-        const certMail = {
-          from: `"Velystra Technology" <${process.env.EMAIL_USER}>`,
-          to: email,
-          subject: "🎓 Congratulations! Your Internship Certificate is Ready",
-          html: `
-            <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-              <h2 style="color: #16A34A;">Congratulations, ${name}! 🎉</h2>
-              <p>Great news! Your internship tasks at <strong>Velystra Technology</strong> have been reviewed and marked as <strong>Completed</strong>.</p>
-              <p>You can now visit our website, enter your Registration ID (<strong>${regId}</strong>), and unlock/download your official certificate.</p>
-              <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
-            </div>
-          `
-        };
-        
-        transporter.sendMail(certMail);
-        
-        // Mark Column N as 'Sent'
+        const certHtml = `
+          <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+            <h2 style="color: #16A34A;">Congratulations, ${name}! 🎉</h2>
+            <p>Great news! Your internship tasks at <strong>Velystra Technology</strong> have been reviewed and marked as <strong>Completed</strong>.</p>
+            <p>You can now visit our website, enter your Registration ID (<strong>${regId}</strong>), and unlock/download your official certificate.</p>
+            <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
+          </div>
+        `;
+
+        sendBrevoEmail(
+          email,
+          name,
+          '🎓 Congratulations! Your Internship Certificate is Ready',
+          certHtml
+        );
+
         await sheets.spreadsheets.values.update({
           spreadsheetId: process.env.SPREADSHEET_ID,
           range: `Form Responses 1!N${i + 1}`,
           valueInputOption: 'USER_ENTERED',
-          requestBody: { values: [['Sent']] }
+          requestBody: { values: [['Sent']] },
         });
       }
     }
   } catch (error) {
-    console.error("Cron Job Error:", error);
+    console.error('Cron Job Error:', error);
   }
 });
-
 
 // ==========================================
 // 6. TASK SUBMISSION API
@@ -412,7 +427,7 @@ app.post('/api/submit-task', async (req, res) => {
   try {
     const { regId, taskLink } = req.body;
     const cleanRegId = regId.replace(/-/g, '').toUpperCase();
-    
+
     const spreadsheetId = process.env.SPREADSHEET_ID;
     const client = await auth.getClient();
     const sheets = google.sheets({ version: 'v4', auth: client });
@@ -428,7 +443,7 @@ app.post('/api/submit-task', async (req, res) => {
     let rowIndex = -1;
     for (let i = 1; i < rows.length; i++) {
       if (rows[i][5] && rows[i][5].replace(/-/g, '').toUpperCase() === cleanRegId) {
-        rowIndex = i + 1; 
+        rowIndex = i + 1;
         break;
       }
     }
@@ -438,14 +453,14 @@ app.post('/api/submit-task', async (req, res) => {
         spreadsheetId,
         range: `Form Responses 1!G${rowIndex}`,
         valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [['Review Pending']] }
+        requestBody: { values: [['Review Pending']] },
       });
-      
+
       await sheets.spreadsheets.values.update({
         spreadsheetId,
         range: `Form Responses 1!M${rowIndex}`,
         valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[taskLink]] }
+        requestBody: { values: [[taskLink]] },
       });
 
       res.json({ success: true, message: 'Task submitted successfully! Our team will review it soon.' });
@@ -453,26 +468,25 @@ app.post('/api/submit-task', async (req, res) => {
       res.status(404).json({ success: false, message: 'Registration ID not found. Please check and try again.' });
     }
   } catch (error) {
-    console.error("Task Submit Error:", error);
+    console.error('Task Submit Error:', error);
     res.status(500).json({ success: false, message: 'Server error during submission.' });
   }
 });
 
-
 // ==========================================
-// 7. CERTIFICATE VALIDATION API (For Employers)
+// 7. CERTIFICATE VALIDATION API
 // ==========================================
 app.get('/api/validate/:certId', async (req, res) => {
   try {
     const certIdToCheck = req.params.certId.replace(/-/g, '').toUpperCase();
     const spreadsheetId = process.env.SPREADSHEET_ID;
-    
+
     const client = await auth.getClient();
     const sheets = google.sheets({ version: 'v4', auth: client });
 
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: 'Form Responses 1!A:L', 
+      range: 'Form Responses 1!A:L',
     });
 
     const rows = response.data.values;
@@ -483,17 +497,17 @@ app.get('/api/validate/:certId', async (req, res) => {
 
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
-      if (row[10] && row[10].toString().trim().toUpperCase() === certIdToCheck) { 
+      if (row[10] && row[10].toString().trim().toUpperCase() === certIdToCheck) {
         userFound = true;
-        userData = { 
-          name: row[1], 
-          domain: row[4], 
+        userData = {
+          name: row[1],
+          domain: row[4],
           regId: row[5],
-          duration: row[7] || '', 
-          startDate: row[8] || '', 
+          duration: row[7] || '',
+          startDate: row[8] || '',
           endDate: row[9] || '',
-          certId: row[10] || '', 
-          issueDate: row[11] || ''
+          certId: row[10] || '',
+          issueDate: row[11] || '',
         };
         break;
       }
@@ -502,7 +516,7 @@ app.get('/api/validate/:certId', async (req, res) => {
     if (!userFound) return res.status(404).json({ success: false, message: 'Invalid Certificate ID. Not found in our records.' });
     return res.json({ success: true, message: 'Certificate is Valid and Verified! ✅', user: userData });
   } catch (error) {
-    console.error("Validate Error:", error);
+    console.error('Validate Error:', error);
     res.status(500).json({ success: false, message: 'Server error during validation' });
   }
 });
