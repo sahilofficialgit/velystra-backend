@@ -4,6 +4,7 @@ const cors = require('cors');
 const { google } = require('googleapis');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 require('dotenv').config();
 
@@ -23,38 +24,16 @@ const razorpay = new Razorpay({
 });
 
 // ==========================================
-// BREVO HTTPS REST API HELPER (100% BYPASSES SMTP BLOCKS)
+// BREVO SMTP TRANSPORTER (PORT 2525 - RENDER FRIENDLY)
 // ==========================================
-async function sendBrevoEmail(toEmail, toName, subject, htmlContent) {
-  try {
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        'accept': 'application/json',
-        'api-key': process.env.BREVO_API_KEY,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        sender: {
-          name: 'Velystra Technology',
-          email: process.env.EMAIL_USER,
-        },
-        to: [{ email: toEmail, name: toName || toEmail }],
-        subject: subject,
-        htmlContent: htmlContent,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      console.error('Brevo API Failed:', data);
-    } else {
-      console.log('Email sent successfully via Brevo API to:', toEmail);
-    }
-  } catch (error) {
-    console.error('Brevo API Request Error:', error);
+const transporter = nodemailer.createTransport({
+  host: 'smtp-relay.brevo.com',
+  port: 2525,
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
   }
-}
+});
 
 const formatStr = (dateObj) => {
   const dd = String(dateObj.getDate()).padStart(2, '0');
@@ -171,7 +150,7 @@ app.post('/api/create-order', async (req, res) => {
 });
 
 // ==========================================
-// 3. PAYMENT VERIFY API (WITH ADMIN EMAIL VIA BREVO API)
+// 3. PAYMENT VERIFY API (WITH ADMIN EMAIL VIA SMTP)
 // ==========================================
 app.post('/api/verify-payment', async (req, res) => {
   try {
@@ -225,28 +204,31 @@ app.post('/api/verify-payment', async (req, res) => {
           const studentPhone = rows[rowIndex - 1][3];
           const studentDomain = rows[rowIndex - 1][4];
 
-          const adminHtml = `
-            <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-              <h2 style="color: #2563EB;">New Printed Certificate Order! 🚀</h2>
-              <p>A student has successfully paid for a <strong>Printed + Courier</strong> certificate.</p>
-              <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #2563EB; margin: 20px 0;">
-                <p><strong>Name:</strong> ${studentName}</p>
-                <p><strong>Email:</strong> ${studentEmail}</p>
-                <p><strong>Phone (WhatsApp):</strong> ${studentPhone}</p>
-                <p><strong>Registration ID:</strong> ${cleanRegId}</p>
-                <p><strong>Domain:</strong> ${studentDomain}</p>
-                <p><strong>Delivery Address:</strong><br><span style="color: #1e40af; font-size: 16px;">${address || 'Address not provided'}</span></p>
+          const adminMail = {
+            from: `"Velystra System" <${process.env.EMAIL_USER}>`,
+            to: 'velystratechnology@gmail.com',
+            subject: `📦 NEW PRINTED CERTIFICATE ORDER: ${cleanRegId}`,
+            html: `
+              <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+                <h2 style="color: #2563EB;">New Printed Certificate Order! 🚀</h2>
+                <p>A student has successfully paid for a <strong>Printed + Courier</strong> certificate.</p>
+                <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #2563EB; margin: 20px 0;">
+                  <p><strong>Name:</strong> ${studentName}</p>
+                  <p><strong>Email:</strong> ${studentEmail}</p>
+                  <p><strong>Phone (WhatsApp):</strong> ${studentPhone}</p>
+                  <p><strong>Registration ID:</strong> ${cleanRegId}</p>
+                  <p><strong>Domain:</strong> ${studentDomain}</p>
+                  <p><strong>Delivery Address:</strong><br><span style="color: #1e40af; font-size: 16px;">${address || 'Address not provided'}</span></p>
+                </div>
+                <p>Please dispatch the printed certificate to the above address.</p>
               </div>
-              <p>Please dispatch the printed certificate to the above address.</p>
-            </div>
-          `;
+            `
+          };
 
-          sendBrevoEmail(
-            'velystratechnology@gmail.com',
-            'Velystra Admin',
-            `📦 NEW PRINTED CERTIFICATE ORDER: ${cleanRegId}`,
-            adminHtml
-          );
+          transporter.sendMail(adminMail, (error, info) => {
+            if (error) console.log("Admin email failed:", error);
+            else console.log("Admin email sent successfully:", info.response);
+          });
         }
 
         res.json({ success: true, message: 'Payment verified!', certId: newCertId, issueDate });
@@ -263,7 +245,7 @@ app.post('/api/verify-payment', async (req, res) => {
 });
 
 // ==========================================
-// 4. APPLICATION FORM API (OFFER LETTER EMAIL VIA BREVO API)
+// 4. APPLICATION FORM API (OFFER LETTER EMAIL VIA SMTP)
 // ==========================================
 app.post('/api/apply', async (req, res) => {
   try {
@@ -299,35 +281,38 @@ app.post('/api/apply', async (req, res) => {
       requestBody: { values: [[timestamp, name, email, whatsapp, domain, regId, 'Pending', duration, startDate, endDate]] },
     });
 
-    // 📩 SENDING WELCOME & OFFER LETTER LINK VIA BREVO API
-    const userEmailHtml = `
-      <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-        <h2 style="color: #0A192F;">Congratulations, ${name}! 🎉</h2>
-        <p>Your application for the <strong>${domain}</strong> internship has been successfully accepted.</p>
-        <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #0A192F; margin: 20px 0;">
-          <p><strong>Registration ID:</strong> <span style="font-size: 18px; color: #0A192F; font-family: monospace;">${regId}</span></p>
-          <p><strong>Duration:</strong> ${duration}</p>
-          <p><strong>Start Date:</strong> ${startDate}</p>
-          <p><strong>End Date:</strong> ${endDate}</p>
+    // 📩 SENDING WELCOME & OFFER LETTER LINK VIA SMTP
+    const mailOptions = {
+      from: `"Velystra Technology" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: 'Welcome & Official Internship Offer Letter - Velystra Technology',
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+          <h2 style="color: #0A192F;">Congratulations, ${name}! 🎉</h2>
+          <p>Your application for the <strong>${domain}</strong> internship has been successfully accepted.</p>
+          <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #0A192F; margin: 20px 0;">
+            <p><strong>Registration ID:</strong> <span style="font-size: 18px; color: #0A192F; font-family: monospace;">${regId}</span></p>
+            <p><strong>Duration:</strong> ${duration}</p>
+            <p><strong>Start Date:</strong> ${startDate}</p>
+            <p><strong>End Date:</strong> ${endDate}</p>
+          </div>
+          <p>You can download your official internship offer letter directly from our portal using your Registration ID:</p>
+          <div style="margin: 25px 0;">
+            <a href="https://your-website.com/offer-letter?regId=${regId}" 
+               style="background: #0A192F; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+               📥 Download Offer Letter
+            </a>
+          </div>
+          <p>Please keep your Registration ID secure for all task submissions and final certification.</p>
+          <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
         </div>
-        <p>You can download your official internship offer letter directly from our portal using your Registration ID:</p>
-        <div style="margin: 25px 0;">
-          <a href="https://your-website.com/offer-letter?regId=${regId}" 
-             style="background: #0A192F; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
-             📥 Download Offer Letter
-          </a>
-        </div>
-        <p>Please keep your Registration ID secure for all task submissions and final certification.</p>
-        <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
-      </div>
-    `;
+      `
+    };
 
-    sendBrevoEmail(
-      email,
-      name,
-      'Welcome & Official Internship Offer Letter - Velystra Technology',
-      userEmailHtml
-    );
+    transporter.sendMail(mailOptions, (error, info) => {
+      if (error) console.log("Email sending failed:", error);
+      else console.log("Email sent successfully:", info.response);
+    });
 
     res.json({ success: true, message: 'Application Submitted!', data: { regId, startDate, endDate, duration } });
   } catch (error) {
@@ -337,7 +322,7 @@ app.post('/api/apply', async (req, res) => {
 });
 
 // ==========================================
-// 5. DAILY CRON JOB (EMAILS VIA BREVO API)
+// 5. DAILY CRON JOB (EMAILS VIA SMTP)
 // ==========================================
 cron.schedule('0 8 * * *', async () => {
   console.log('Running Daily Email Automation Check...');
@@ -368,22 +353,30 @@ cron.schedule('0 8 * * *', async () => {
 
       // Condition 1: Internship Starts Today
       if (startDate === todayStr) {
-        sendBrevoEmail(
-          email,
-          name,
-          '🚀 Your Velystra Internship Starts Today!',
-          `<p>Hi ${name},</p><p>Welcome aboard! Your internship officially begins today. Keep an eye on your dashboard/tasks.</p>`
-        );
+        const startMail = {
+          from: `"Velystra Technology" <${process.env.EMAIL_USER}>`,
+          to: email,
+          subject: "🚀 Your Velystra Internship Starts Today!",
+          html: `<p>Hi ${name},</p><p>Welcome aboard! Your internship officially begins today. Keep an eye on your dashboard/tasks.</p>`
+        };
+        transporter.sendMail(startMail, (err, info) => {
+          if (err) console.log("Start email failed:", err);
+          else console.log("Start email sent:", info.response);
+        });
       }
 
       // Condition 2: 3 Days Left Reminder
       if (endDate === reminderDateStr) {
-        sendBrevoEmail(
-          email,
-          name,
-          '⏳ Reminder: 3 Days Left for Submission!',
-          `<p>Hi ${name},</p><p>Your internship end date is approaching on <strong>${endDate}</strong>. Please ensure all tasks are submitted to be eligible for your certificate.</p>`
-        );
+        const reminderMail = {
+          from: `"Velystra Technology" <${process.env.EMAIL_USER}>`,
+          to: email,
+          subject: "⏳ Reminder: 3 Days Left for Submission!",
+          html: `<p>Hi ${name},</p><p>Your internship end date is approaching on <strong>${endDate}</strong>. Please ensure all tasks are submitted to be eligible for your certificate.</p>`
+        };
+        transporter.sendMail(reminderMail, (err, info) => {
+          if (err) console.log("Reminder email failed:", err);
+          else console.log("Reminder email sent:", info.response);
+        });
       }
 
       // Condition 3: Status 'Done' - Send Certificate Unlock Email
@@ -391,22 +384,25 @@ cron.schedule('0 8 * * *', async () => {
       const emailSentFlag = rows[i][13] ? rows[i][13].toString().trim() : '';
 
       if (status === 'done' && emailSentFlag !== 'Sent') {
-        const certHtml = `
-          <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-            <h2 style="color: #16A34A;">Congratulations, ${name}! 🎉</h2>
-            <p>Great news! Your internship tasks at <strong>Velystra Technology</strong> have been reviewed and marked as <strong>Completed</strong>.</p>
-            <p>You can now visit our website, enter your Registration ID (<strong>${regId}</strong>), and unlock/download your official certificate.</p>
-            <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
-          </div>
-        `;
-
-        sendBrevoEmail(
-          email,
-          name,
-          '🎓 Congratulations! Your Internship Certificate is Ready',
-          certHtml
-        );
-
+        const certMail = {
+          from: `"Velystra Technology" <${process.env.EMAIL_USER}>`,
+          to: email,
+          subject: "🎓 Congratulations! Your Internship Certificate is Ready",
+          html: `
+            <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+              <h2 style="color: #16A34A;">Congratulations, ${name}! 🎉</h2>
+              <p>Great news! Your internship tasks at <strong>Velystra Technology</strong> have been reviewed and marked as <strong>Completed</strong>.</p>
+              <p>You can now visit our website, enter your Registration ID (<strong>${regId}</strong>), and unlock/download your official certificate.</p>
+              <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
+            </div>
+          `
+        };
+        
+        transporter.sendMail(certMail, (err, info) => {
+          if (err) console.log("Cert email failed:", err);
+          else console.log("Cert email sent:", info.response);
+        });
+        
         await sheets.spreadsheets.values.update({
           spreadsheetId: process.env.SPREADSHEET_ID,
           range: `Form Responses 1!N${i + 1}`,
