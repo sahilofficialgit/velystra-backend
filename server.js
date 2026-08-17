@@ -6,7 +6,11 @@ const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
+const dns = require('dns');
 require('dotenv').config();
+
+// 🌐 FORCE IPv4 FOR RENDER CLOUD ENVIRONMENT
+dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 app.use(cors());
@@ -24,9 +28,7 @@ const razorpay = new Razorpay({
 });
 
 // ==========================================
-// ==========================================
-// ==========================================
-// EMAIL TRANSPORTER SETUP (FORCED IPv4)
+// EMAIL TRANSPORTER SETUP (FIXED FOR RENDER IPv4)
 // ==========================================
 const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
@@ -36,7 +38,7 @@ const transporter = nodemailer.createTransport({
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
   },
-  family: 4 // Yeh line Render par IPv6 error ko aane se rok degi (Forces IPv4)
+  family: 4
 });
 
 const formatStr = (dateObj) => {
