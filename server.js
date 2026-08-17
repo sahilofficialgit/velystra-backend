@@ -1,8 +1,4 @@
 // server.js
-
-const dns = require('dns');
-dns.setServers(['8.8.8.8', '8.8.4.4']); // Google DNS force karo
-
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -10,11 +6,7 @@ const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
-const dns = require('dns');
 require('dotenv').config();
-
-// 🌐 FORCE IPv4 FOR RENDER CLOUD ENVIRONMENT
-dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 app.use(cors());
@@ -32,24 +24,15 @@ const razorpay = new Razorpay({
 });
 
 // ==========================================
-// ==========================================
-// FINAL HARDCORE FIX: NO DNS LOOKUP
+// EMAIL TRANSPORTER SETUP (BREVO SMTP)
 // ==========================================
 const transporter = nodemailer.createTransport({
-  host: '142.250.138.109', // Gmail ka hardcoded IPv4 IP
-  port: 465,
-  secure: true,
+  host: 'smtp-relay.brevo.com',
+  port: 587,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
-  },
-  tls: {
-    rejectUnauthorized: false,
-    servername: 'smtp.gmail.com' // SSL validation ke liye
-  },
-  // IPv6 ko disable karne ka final try
-  socketTimeout: 10000,
-  connectionTimeout: 10000,
+  }
 });
 
 const formatStr = (dateObj) => {
