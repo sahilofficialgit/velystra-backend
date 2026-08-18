@@ -8,7 +8,14 @@ const cron = require('node-cron');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
+
+// --- CORS CONFIGURATION (ADDED HERE) ---
+app.use(cors({
+  origin: 'https://velystra.vercel.app', // Tera Vercel frontend URL
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true
+}));
+
 app.use(express.json());
 
 // Google Sheets Setup
