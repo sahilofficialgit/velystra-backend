@@ -11,7 +11,7 @@ const app = express();
 
 // --- CORS CONFIGURATION (ADDED HERE) ---
 app.use(cors({
-  origin: 'https://velystra-technology.vercel.app', // Tera Vercel frontend URL
+  origin: 'https://velystra-technology.vercel.app/', // Tera Vercel frontend URL
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
