@@ -10,9 +10,8 @@ require('dotenv').config();
 const app = express();
 
 app.use(cors({
-  origin: ['https://velystra-technology.vercel.app', 'https://velystrathetechnology.vercel.app'], // Jo bhi variants hain sab dal do
+  origin: ['https://velystra-technology.vercel.app'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
 
