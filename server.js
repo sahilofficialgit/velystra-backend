@@ -9,12 +9,15 @@ require('dotenv').config();
 
 const app = express();
 
-// --- CORS CONFIGURATION (ADDED HERE) ---
 app.use(cors({
-  origin: 'https://velystra-technology.vercel.app/', // Tera Vercel frontend URL
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  origin: ['https://velystra-technology.vercel.app', 'https://velystrathetechnology.vercel.app'], // Jo bhi variants hain sab dal do
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
+
+// Preflight requests ke liye extra protection
+app.options('*', cors());
 
 app.use(express.json());
 
