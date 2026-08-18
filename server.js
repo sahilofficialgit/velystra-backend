@@ -11,7 +11,7 @@ const app = express();
 
 // --- CORS CONFIGURATION (ADDED HERE) ---
 app.use(cors({
-  origin: 'https://velystra.vercel.app', // Tera Vercel frontend URL
+  origin: 'https://velystra-technology.vercel.app', // Tera Vercel frontend URL
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
@@ -153,7 +153,7 @@ app.post('/api/create-order', async (req, res) => {
 
     if (!userFound) return res.status(404).json({ success: false, message: 'User not found' });
 
-    let finalAmount = 150;
+    let finalAmount = 1;
     if (userDuration.includes('3')) {
       finalAmount = deliveryOption === 'printed' ? 450 : 300;
     } else if (userDuration.includes('6')) {
