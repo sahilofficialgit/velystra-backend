@@ -15,9 +15,6 @@ app.use(cors({
   credentials: true
 }));
 
-// Preflight requests ke liye extra protection
-app.options('*', cors());
-
 app.use(express.json());
 
 // Google Sheets Setup
