@@ -139,12 +139,10 @@ app.post('/api/create-order', async (req, res) => {
     const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Form Responses 1!A:J' });
     const rows = response.data.values;
 
-    let userDuration = '1 Month';
     let userFound = false;
 
     for (let i = 1; i < rows.length; i++) {
       if (rows[i][5] && rows[i][5].replace(/-/g, '').toUpperCase() === cleanRegId) {
-        userDuration = rows[i][7] || '1 Month';
         userFound = true;
         break;
       }
@@ -152,17 +150,11 @@ app.post('/api/create-order', async (req, res) => {
 
     if (!userFound) return res.status(404).json({ success: false, message: 'User not found' });
 
+    // 🧪 TESTING KE LIYE AMOUNT DIRECT 1 RUPAY LOCK KAR DIYA
     let finalAmount = 1;
-    if (userDuration.includes('3')) {
-      finalAmount = deliveryOption === 'printed' ? 450 : 300;
-    } else if (userDuration.includes('6')) {
-      finalAmount = deliveryOption === 'printed' ? 700 : 500;
-    } else {
-      finalAmount = deliveryOption === 'printed' ? 299 : 150;
-    }
 
     const options = {
-      amount: finalAmount * 100,
+      amount: finalAmount * 100, // 1 * 100 = 100 paise (₹1)
       currency: 'INR',
       receipt: `receipt_${cleanRegId}`,
     };
