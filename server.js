@@ -307,26 +307,41 @@ app.post('/api/apply', async (req, res) => {
 
     // 📩 SENDING WELCOME & OFFER LETTER LINK VIA BREVO API
     const userEmailHtml = `
-      <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-        <h2 style="color: #0A192F;">Congratulations, ${name}! 🎉</h2>
-        <p>Your application for the <strong>${domain}</strong> internship has been successfully accepted.</p>
-        <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #0A192F; margin: 20px 0;">
-          <p><strong>Registration ID:</strong> <span style="font-size: 18px; color: #0A192F; font-family: monospace;">${regId}</span></p>
-          <p><strong>Duration:</strong> ${duration}</p>
-          <p><strong>Start Date:</strong> ${startDate}</p>
-          <p><strong>End Date:</strong> ${endDate}</p>
-        </div>
-        <p>You can download your official internship offer letter directly from our portal using your Registration ID:</p>
-        <div style="margin: 25px 0;">
-          <a href="https://velystra-technology.vercel.app/offer-letter?regId=${regId}" 
-             style="background: #0A192F; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
-             📥 Download Offer Letter
-          </a>
-        </div>
-        <p>Please keep your Registration ID secure for all task submissions and final certification.</p>
-        <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
-      </div>
-    `;
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden;">
+        <div style="background-color: #0A192F; padding: 20px; text-align: center;">
+            <h1 style="color: #ffffff; margin: 0;">Velystra Technology</h1>
+        </div>
+        <div style="padding: 30px;">
+            <h2 style="color: #0A192F;">Hi ${name},</h2>
+            <p>Congratulations! We are thrilled to welcome you to the <strong>${domain}</strong> internship program at Velystra Technology.</p>
+        
+            <p>Your application stood out, and we are excited to have you on board. Below are your official internship details:</p>
+        
+        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; border-left: 5px solid #0A192F; margin: 25px 0;">
+            <p style="margin: 5px 0;"><strong>Registration ID:</strong> <span style="font-family: monospace; font-size: 16px; color: #d97706;">${regId}</span></p>
+            <p style="margin: 5px 0;"><strong>Internship Duration:</strong> ${duration}</p>
+            <p style="margin: 5px 0;"><strong>Start Date:</strong> ${startDate}</p>
+            <p style="margin: 5px 0;"><strong>End Date:</strong> ${endDate}</p>
+        </div>
+
+            <p>To officially commence your journey, please download your offer letter using the link below:</p>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="https://velystra-technology.vercel.app/offer-letter?regId=${regId}" 
+            style="background: #2563EB; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+            📥 Download Official Offer Letter
+            </a>
+        </div>
+
+            <p>Please keep your <strong>Registration ID</strong> safe, as it will be required for all your task submissions and communication with our team.</p>
+            <p>If you have any questions, feel free to reply to this email.</p>
+            <p>Best regards,<br><strong>Team Velystra Technology</strong></p>
+        </div>
+        <div style="background-color: #f4f4f4; padding: 15px; text-align: center; font-size: 12px; color: #777;">
+        &copy; ${new Date().getFullYear()} Velystra Technology. All rights reserved.
+        </div>
+    </div>
+    `;
 
     sendBrevoEmail(
       email,
