@@ -288,7 +288,7 @@ app.post('/api/verify-payment', async (req, res) => {
 });
 
 // ==========================================
-// 4. APPLICATION FORM API (ROLLING BATCH SYSTEM)
+// 4. APPLICATION FORM API (MANUAL APPROVAL SYSTEM)
 // ==========================================
 app.post('/api/apply', async (req, res) => {
   try {
@@ -303,7 +303,6 @@ app.post('/api/apply', async (req, res) => {
     const random6Digits = Math.floor(100000 + Math.random() * 900000);
     const regId = `${prefix}${currentYearStr}${random6Digits}`;
 
-    // 🚀 ROLLING DATES LOGIC: Starts 7 days from today, runs for selected duration
     const startDateObj = new Date();
     startDateObj.setDate(startDateObj.getDate() + 7);
 
@@ -324,7 +323,84 @@ app.post('/api/apply', async (req, res) => {
       range: 'Form Responses 1!A:A',
       valueInputOption: 'USER_ENTERED',
       insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [[timestamp, name, email, whatsapp, domain, regId, 'Pending', duration, startDate, endDate]] },
+      requestBody: { values: [[timestamp, name, email, whatsapp, domain, regId, 'Pending Approval', duration, startDate, endDate]] },
+    });
+
+    // 📩 NOTIFY ADMIN (SAHIL) TO APPROVE
+    const adminApprovalUrl = `https://velystra-backend.onrender.com/api/approve-application?regId=${regId}`;
+    const adminHtml = `
+      <div style="font-family: Arial, sans-serif; padding: 20px; color: #333; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 10px;">
+        <h2 style="color: #2563EB;">New Internship Application! 🚀</h2>
+        <p>A new student has applied and is waiting for your approval.</p>
+        <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #2563EB; margin: 20px 0;">
+          <p><strong>Name:</strong> ${name}</p>
+          <p><strong>Email:</strong> ${email}</p>
+          <p><strong>WhatsApp:</strong> ${whatsapp}</p>
+          <p><strong>Domain:</strong> ${domain}</p>
+          <p><strong>Registration ID:</strong> ${regId}</p>
+        </div>
+        <p style="text-align: center; margin: 30px 0;">
+          <a href="${adminApprovalUrl}" style="background: #16A34A; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+            ✅ Click Here to Approve & Send Offer Letter
+          </a>
+        </p>
+      </div>
+    `;
+
+    sendBrevoEmail(
+      'sahilshaikh0729@gmail.com',
+      'Sahil Shaikh',
+      `🔔 New Application Approval Needed: ${name} (${regId})`,
+      adminHtml
+    );
+
+    res.json({ success: true, message: 'Application Submitted!', data: { regId } });
+  } catch (error) {
+    console.error('Apply API Error:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+});
+
+// ==========================================
+// 4.1 ADMIN APPROVAL ENDPOINT (1-CLICK APPROVAL)
+// ==========================================
+app.get('/api/approve-application', async (req, res) => {
+  try {
+    const { regId } = req.query;
+    if (!regId) return res.status(400).send('Missing Registration ID');
+
+    const cleanRegId = regId.replace(/-/g, '').toUpperCase();
+    const spreadsheetId = process.env.SPREADSHEET_ID;
+    const client = await auth.getClient();
+    const sheets = google.sheets({ version: 'v4', auth: client });
+
+    const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Form Responses 1!A:N' });
+    const rows = response.data.values;
+    let rowIndex = -1;
+    let student = {};
+
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][5] && rows[i][5].replace(/-/g, '').toUpperCase() === cleanRegId) {
+        rowIndex = i + 1;
+        student = {
+          name: rows[i][1],
+          email: rows[i][2],
+          domain: rows[i][4],
+          duration: rows[i][7] || '1 Month',
+          startDate: rows[i][8],
+          endDate: rows[i][9],
+        };
+        break;
+      }
+    }
+
+    if (rowIndex === -1) return res.status(404).send('Student not found in database.');
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `Form Responses 1!G${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [['Pending']] },
     });
 
     const userEmailHtml = `
@@ -333,48 +409,43 @@ app.post('/api/apply', async (req, res) => {
             <h1 style="color: #ffffff; margin: 0;">Velystra Technology</h1>
         </div>
         <div style="padding: 30px;">
-            <h2 style="color: #0A192F;">Hi ${name},</h2>
-            <p>Congratulations! We are thrilled to welcome you to the <strong>${domain}</strong> internship program at Velystra Technology.</p>
-        
-            <p>Your application stood out, and we are excited to have you on board. Below are your official internship details:</p>
+            <h2 style="color: #0A192F;">Hi ${student.name},</h2>
+            <p>Congratulations! Your application has been reviewed and approved. We are thrilled to welcome you to the <strong>${student.domain}</strong> internship program at Velystra Technology.</p>
         
         <div style="background: #f8fafc; padding: 20px; border-radius: 8px; border-left: 5px solid #0A192F; margin: 25px 0;">
-            <p style="margin: 5px 0;"><strong>Registration ID:</strong> <span style="font-family: monospace; font-size: 16px; color: #d97706;">${regId}</span></p>
-            <p style="margin: 5px 0;"><strong>Internship Duration:</strong> ${duration}</p>
-            <p style="margin: 5px 0;"><strong>Start Date:</strong> ${startDate}</p>
-            <p style="margin: 5px 0;"><strong>End Date:</strong> ${endDate}</p>
+            <p style="margin: 5px 0;"><strong>Registration ID:</strong> <span style="font-family: monospace; font-size: 16px; color: #d97706;">${cleanRegId}</span></p>
+            <p style="margin: 5px 0;"><strong>Internship Duration:</strong> ${student.duration}</p>
+            <p style="margin: 5px 0;"><strong>Start Date:</strong> ${student.startDate}</p>
+            <p style="margin: 5px 0;"><strong>End Date:</strong> ${student.endDate}</p>
         </div>
 
-            <p>To officially commence your journey, please download your offer letter using the link below:</p>
+            <p>To officially commence your journey, please download your official offer letter using the link below:</p>
         
         <div style="text-align: center; margin: 30px 0;">
-            <a href="https://velystra-technology.vercel.app/offer-letter?regId=${regId}" 
+            <a href="https://velystra-technology.vercel.app/offer-letter?regId=${cleanRegId}" 
             style="background: #2563EB; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
             📥 Download Official Offer Letter
             </a>
         </div>
 
-            <p>Please keep your <strong>Registration ID</strong> safe, as it will be required for all your task submissions and communication with our team.</p>
-            <p>If you have any questions, feel free to reply to this email.</p>
+            <p>Please keep your <strong>Registration ID</strong> safe for all task submissions.</p>
             <p>Best regards,<br><strong>Team Velystra Technology</strong></p>
-        </div>
-        <div style="background-color: #f4f4f4; padding: 15px; text-align: center; font-size: 12px; color: #777;">
-        &copy; ${new Date().getFullYear()} Velystra Technology. All rights reserved.
         </div>
     </div>
     `;
 
-    sendBrevoEmail(
-      email,
-      name,
-      'Welcome & Official Internship Offer Letter - Velystra Technology',
-      userEmailHtml
-    );
+    sendBrevoEmail(student.email, student.name, 'Official Internship Offer Letter - Velystra Technology', userEmailHtml);
 
-    res.json({ success: true, message: 'Application Submitted!', data: { regId, startDate, endDate, duration } });
+    res.send(`
+      <div style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+        <h1 style="color: #16A34A;">Application Approved Successfully! 🎉</h1>
+        <p>Offer letter has been dispatched to <strong>${student.email}</strong> for <strong>${student.name}</strong>.</p>
+        <p>You can close this tab now.</p>
+      </div>
+    `);
   } catch (error) {
-    console.error('Apply API Error:', error);
-    res.status(500).json({ success: false, message: 'Server Error' });
+    console.error('Approval Error:', error);
+    res.status(500).send('Internal Server Error during approval.');
   }
 });
 
