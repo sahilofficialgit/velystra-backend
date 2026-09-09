@@ -133,7 +133,6 @@ app.post('/api/create-order', async (req, res) => {
     const { regId, deliveryOption } = req.body;
     const cleanRegId = regId.replace(/-/g, '').toUpperCase();
 
-    // Agar student ne digital certificate (free) select kiya hai, toh order create karne ki zaroorat nahi hai
     if (deliveryOption === 'digital' || !deliveryOption) {
       return res.json({ success: true, isFree: true, message: 'Digital certificate is free!' });
     }
@@ -157,7 +156,7 @@ app.post('/api/create-order', async (req, res) => {
 
     if (!userFound) return res.status(404).json({ success: false, message: 'User not found' });
 
-    let finalAmount = 299; // Default printed price for 1 month
+    let finalAmount = 299;
     if (userDuration.includes('3')) {
       finalAmount = 450;
     } else if (userDuration.includes('6')) {
@@ -210,12 +209,10 @@ app.post('/api/verify-payment', async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
 
-    // Agar pehle se certificate generated hai toh wahi return kar do
     if (existingCertId && existingCertId.trim() !== '') {
       return res.json({ success: true, message: 'Existing ID used.', certId: existingCertId, issueDate: rows[rowIndex - 1][11] });
     }
 
-    // AGAR DIGITAL (FREE) HAI TOH BINA PAYMENT SIGNATURE VERIFY KIYE CERTIFICATE GENERATE KAR DO
     if (isFree || deliveryOption === 'digital') {
       const year = new Date().getFullYear().toString().slice(-2);
       const random6Digits = Math.floor(100000 + Math.random() * 900000);
@@ -234,7 +231,6 @@ app.post('/api/verify-payment', async (req, res) => {
       return res.json({ success: true, message: 'Free Digital Certificate Claimed!', certId: newCertId, issueDate });
     }
 
-    // AGAR PRINTED HAI TOH RAZORPAY SIGNATURE VERIFY KARNA ZAROORI HAI
     const body = razorpay_order_id + '|' + razorpay_payment_id;
     const expectedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(body.toString()).digest('hex');
 
@@ -253,7 +249,6 @@ app.post('/api/verify-payment', async (req, res) => {
         requestBody: { values: [[newCertId, issueDate]] },
       });
 
-      // 📦 ADMIN KO NOTIFICATION FOR PRINTED ORDER
       const studentName = rows[rowIndex - 1][1];
       const studentEmail = rows[rowIndex - 1][2];
       const studentPhone = rows[rowIndex - 1][3];
@@ -293,7 +288,7 @@ app.post('/api/verify-payment', async (req, res) => {
 });
 
 // ==========================================
-// 4. APPLICATION FORM API (OFFER LETTER EMAIL VIA BREVO API)
+// 4. APPLICATION FORM API (ROLLING BATCH SYSTEM)
 // ==========================================
 app.post('/api/apply', async (req, res) => {
   try {
@@ -308,13 +303,16 @@ app.post('/api/apply', async (req, res) => {
     const random6Digits = Math.floor(100000 + Math.random() * 900000);
     const regId = `${prefix}${currentYearStr}${random6Digits}`;
 
-    const today = new Date();
-    const nextMonthFirst = new Date(today.getFullYear(), today.getMonth() + 1, 1);
-    const durationMonths = parseInt(duration.split(' ')[0]) || 1;
-    const targetEndDate = new Date(today.getFullYear(), today.getMonth() + 1 + durationMonths, 0);
+    // 🚀 ROLLING DATES LOGIC: Starts 7 days from today, runs for selected duration
+    const startDateObj = new Date();
+    startDateObj.setDate(startDateObj.getDate() + 7);
 
-    const startDate = formatStr(nextMonthFirst);
-    const endDate = formatStr(targetEndDate);
+    const durationMonths = parseInt(duration) || 1; 
+    const endDateObj = new Date(startDateObj);
+    endDateObj.setMonth(endDateObj.getMonth() + durationMonths);
+
+    const startDate = formatStr(startDateObj);
+    const endDate = formatStr(endDateObj);
     const timestamp = new Date().toLocaleString('en-GB');
 
     const spreadsheetId = process.env.SPREADSHEET_ID;
@@ -329,7 +327,6 @@ app.post('/api/apply', async (req, res) => {
       requestBody: { values: [[timestamp, name, email, whatsapp, domain, regId, 'Pending', duration, startDate, endDate]] },
     });
 
-    // 📩 SENDING WELCOME & OFFER LETTER LINK VIA BREVO API
     const userEmailHtml = `
     <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden;">
         <div style="background-color: #0A192F; padding: 20px; text-align: center;">
@@ -411,7 +408,6 @@ cron.schedule('0 8 * * *', async () => {
       const startDate = rows[i][8];
       const endDate = rows[i][9];
 
-      // Condition 1: Internship Starts Today
       if (startDate === todayStr) {
         sendBrevoEmail(
           email,
@@ -421,7 +417,6 @@ cron.schedule('0 8 * * *', async () => {
         );
       }
 
-      // Condition 2: 3 Days Left Reminder
       if (endDate === reminderDateStr) {
         sendBrevoEmail(
           email,
@@ -431,7 +426,6 @@ cron.schedule('0 8 * * *', async () => {
         );
       }
 
-      // Condition 3: Status 'Done' - Send Certificate Unlock Email
       const status = rows[i][6] ? rows[i][6].toString().trim().toLowerCase() : '';
       const emailSentFlag = rows[i][13] ? rows[i][13].toString().trim() : '';
 
