@@ -1,0 +1,93 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  name         String?
+  role         Role      @default(STUDENT)
+  student      Student?
+  college      College?  @relation("CollegeAdmin")
+  createdAt    DateTime  @default(now())
+}
+
+enum Role {
+  SUPER_ADMIN
+  COLLEGE_ADMIN
+  STUDENT
+}
+
+model College {
+  id          String       @id @default(uuid())
+  name        String
+  code        String       @unique // 6-digit unique code for student registration
+  city        String?
+  state       String?
+  adminId     String?      @unique
+  admin       User?        @relation("CollegeAdmin", fields: [adminId], references: [id], onDelete: Cascade)
+  students    Student[]
+  challenges  Challenge[]  // <-- Yeh opposite relation zaroori hai!
+  createdAt   DateTime     @default(now())
+}
+
+model Student {
+  id             String       @id @default(uuid())
+  userId         String       @unique
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fullName       String
+  prnNumber      String       // Global unique hata diya hai
+  phone          String?
+  avatarUrl      String?      // Profile picture URL
+  bio            String?      // Short bio
+  domain         String       @default("Full Stack Development") // Domain tag (Frontend, Backend, etc.)
+  collegeId      String
+  college        College      @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  branch         String?
+  graduationYear Int          @default(2026)
+  isApproved     Boolean      @default(false) // PRN verification flag
+  campusScore    Int          @default(0)
+  submissions    Submission[]
+  createdAt      DateTime     @default(now())
+
+  @@unique([collegeId, prnNumber]) // Ensures PRN is unique strictly within the same college
+}
+
+model Challenge {
+  id           String       @id @default(uuid())
+  title        String
+  description  String
+  points       Int          @default(100)
+  deadline     DateTime?
+  isActive     Boolean      @default(true)
+  collegeId    String?      // Null = Public event, ID = College exclusive event
+  college      College?     @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  submissions  Submission[]
+  createdAt    DateTime     @default(now())
+}
+
+model Submission {
+  id           String       @id @default(uuid())
+  studentId    String
+  student      Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  challengeId  String
+  challenge    Challenge    @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  githubUrl    String
+  deployedUrl  String?
+  status       Status       @default(PENDING)
+  scoreAwarded Int          @default(0)
+  feedback     String?      // <-- Rejection reason / feedback from admin
+  createdAt    DateTime     @default(now())
+}
+
+enum Status {
+  PENDING
+  APPROVED
+  REJECTED
+}

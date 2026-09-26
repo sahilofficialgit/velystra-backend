@@ -4,23 +4,31 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "postinstall": "prisma skills sync || exit 0"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@prisma/client": "^5.19.0",
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
     "googleapis": "^174.0.1",
     "handlebars": "^4.7.9",
+    "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.9.2",
     "node-cron": "^4.6.0",
     "nodemailer": "^9.0.5",
     "pdfkit": "^0.19.1",
     "puppeteer": "^25.7.0",
     "razorpay": "^2.9.8"
+  },
+  "devDependencies": {
+    "prisma": "^5.19.0"
   }
 }

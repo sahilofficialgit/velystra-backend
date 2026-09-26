@@ -1,23 +1,101 @@
-// server.js
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
-const cron = require('node-cron');
+const { PrismaClient } = require('@prisma/client');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
+const prisma = new PrismaClient();
+
+// ================= RATE LIMITER =================
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // Limit each IP to 20 requests per windowMs
+  message: { success: false, message: 'Too many requests from this IP, please try again after 15 minutes.' }
+});
+
+app.post('/api/auth/login', authLimiter);
+app.post('/api/auth/register', authLimiter);
+app.post('/api/auth/forgot-password', authLimiter);
 
 app.use(cors({
-  origin: ['https://velystra-technology.vercel.app'],
+  origin: ['http://localhost:5173', 'https://velystra-technology.vercel.app'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true
 }));
 
 app.use(express.json());
 
-// Google Sheets Setup
+// ================= MIDDLEWARES =================
+const verifyToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
+
+  jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret', (err, user) => {
+    if (err) return res.status(403).json({ success: false, message: 'Invalid or expired token.' });
+    req.user = user;
+    next();
+  });
+};
+
+const authorizeRoles = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access forbidden.' });
+    }
+    next();
+  };
+};
+
+const verifyCollegeAdmin = async (req, res, next) => {
+  try {
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'Unauthorized. Please login.' });
+    }
+    if (user.role !== 'COLLEGE_ADMIN' && user.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ success: false, message: 'Access denied. College Admin role required.' });
+    }
+    if (user.role === 'COLLEGE_ADMIN') {
+      const college = await prisma.college.findFirst({ where: { adminId: user.userId } });
+      if (!college) {
+        return res.status(403).json({ success: false, message: 'No college managed by this admin.' });
+      }
+      req.managedCollegeId = college.id; // Multi-tenant isolation ID
+    }
+    next();
+  } catch (err) {
+    console.error('Admin Auth Middleware Error:', err);
+    res.status(500).json({ success: false, message: 'Authorization error.' });
+  }
+};
+
+// Brevo Email Helper Function
+const sendBrevoEmail = async (toEmail, toName, subject, htmlContent) => {
+  if (!process.env.BREVO_API_KEY) {
+    console.warn('BREVO_API_KEY not set in environment variables.');
+    return;
+  }
+  await axios.post('https://api.brevo.com/v3/smtp/email', {
+    sender: { name: 'Velystra Technology', email: process.env.SENDER_EMAIL || 'no-reply@velystra.com' },
+    to: [{ email: toEmail, name: toName }],
+    subject: subject,
+    htmlContent: htmlContent
+  }, {
+    headers: {
+      'api-key': process.env.BREVO_API_KEY,
+      'Content-Type': 'application/json'
+    }
+  });
+};
+
 const auth = new google.auth.GoogleAuth({
   keyFile: 'credentials.json',
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
@@ -28,610 +106,431 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// ==========================================
-// BREVO HTTPS REST API HELPER (100% RENDER-FRIENDLY)
-// ==========================================
-async function sendBrevoEmail(toEmail, toName, subject, htmlContent) {
+// ================= AUTHENTICATION =================
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        'accept': 'application/json',
-        'api-key': process.env.BREVO_API_KEY,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        sender: {
-          name: 'Velystra Technology',
-          email: process.env.EMAIL_USER,
+    const { email, password, name, role, prnNumber, collegeCode, collegeName, domain, avatarUrl, bio } = req.body;
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) return res.status(400).json({ success: false, message: 'User already exists.' });
+
+    const passwordHash = await bcrypt.hash(password, await bcrypt.genSalt(10));
+    const newUser = await prisma.user.create({ data: { email, passwordHash, name: name || '', role: role || 'STUDENT' } });
+
+    if (role === 'COLLEGE_ADMIN' && collegeName) {
+      const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
+      await prisma.college.create({ data: { name: collegeName, code: randomCode, city: 'Pune', state: 'Maharashtra', adminId: newUser.id } });
+    }
+
+    if (role === 'STUDENT' && prnNumber && collegeCode) {
+      const college = await prisma.college.findUnique({ where: { code: collegeCode.trim() } });
+      if (!college) {
+        await prisma.user.delete({ where: { id: newUser.id } });
+        return res.status(400).json({ success: false, message: 'Invalid College ID!' });
+      }
+
+      await prisma.student.create({
+        data: {
+          userId: newUser.id,
+          fullName: name,
+          prnNumber: prnNumber.trim(),
+          collegeId: college.id,
+          domain: domain || 'Full Stack Developer',
+          avatarUrl: avatarUrl || '',
+          bio: bio || '',
+          isApproved: false,
+        }
+      });
+    }
+
+    res.json({ success: true, message: 'Registered successfully!', userId: newUser.id });
+  } catch (error) {
+    console.error('Register Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+      return res.status(400).json({ success: false, message: 'Invalid email or password.' });
+    }
+
+    const token = jwt.sign({ userId: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'fallback', { expiresIn: '7d' });
+    let collegeDetails = null;
+    if (user.role === 'COLLEGE_ADMIN') {
+      collegeDetails = await prisma.college.findFirst({ where: { adminId: user.id } });
+    }
+
+    const studentRecord = await prisma.student.findUnique({ where: { userId: user.id } });
+
+    res.json({ success: true, token, user: { id: user.id, email: user.email, name: user.name, role: user.role, college: collegeDetails, student: studentRecord } });
+  } catch (error) {
+    console.error('Login Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ================= STUDENT PROFILE UPDATE =================
+app.put('/api/student/profile', verifyToken, async (req, res) => {
+  try {
+    const { fullName, avatarUrl, bio, domain } = req.body;
+    const updatedStudent = await prisma.student.update({
+      where: { userId: req.user.userId },
+      data: { fullName, avatarUrl, bio, domain }
+    });
+    res.json({ success: true, message: 'Profile updated successfully!', updatedStudent });
+  } catch (error) {
+    console.error('Profile Update Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ================= COLLEGE ADMIN STATS & STUDENTS =================
+app.get('/api/admin/stats', verifyToken, verifyCollegeAdmin, async (req, res) => {
+  try {
+    const collegeId = req.managedCollegeId;
+    const students = await prisma.student.findMany({
+      where: collegeId ? { collegeId, isApproved: true } : {},
+      include: { college: true },
+      orderBy: { campusScore: 'desc' }
+    });
+
+    res.json({ success: true, totalStudents: students.length, students });
+  } catch (error) {
+    console.error('Admin Stats Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+app.get('/api/admin/pending-students', verifyToken, verifyCollegeAdmin, async (req, res) => {
+  try {
+    const collegeId = req.managedCollegeId;
+    const students = await prisma.student.findMany({ 
+      where: { collegeId, isApproved: false }, 
+      include: { user: { select: { email: true } }, college: true } 
+    });
+    const managedCollege = await prisma.college.findUnique({ where: { id: collegeId } });
+
+    res.json({ success: true, students, collegeCode: managedCollege?.code || null });
+  } catch (error) {
+    console.error('Pending Students Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+app.post('/api/admin/students/:id/approve', verifyToken, verifyCollegeAdmin, async (req, res) => {
+  try {
+    const student = await prisma.student.update({ where: { id: req.params.id }, data: { isApproved: true }, include: { user: true, college: true } });
+    res.json({ success: true, message: 'Student approved!', student });
+  } catch (error) {
+    console.error('Approve Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ================= CHALLENGES =================
+app.post('/api/challenges', verifyToken, verifyCollegeAdmin, async (req, res) => {
+  try {
+    const { title, description, points, deadline } = req.body;
+    const challenge = await prisma.challenge.create({
+      data: { title, description, points: parseInt(points) || 100, deadline: deadline ? new Date(deadline) : null, collegeId: req.managedCollegeId || null, isActive: true }
+    });
+
+    res.json({ success: true, message: 'Challenge created!', challenge });
+  } catch (error) {
+    console.error('Challenge Create Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+app.put('/api/admin/challenges/:id', verifyToken, verifyCollegeAdmin, async (req, res) => {
+  try {
+    const { title, description, points, deadline, isActive } = req.body;
+    const updated = await prisma.challenge.update({
+      where: { id: req.params.id },
+      data: {
+        title,
+        description,
+        points: points !== undefined ? parseInt(points) : undefined,
+        deadline: deadline ? new Date(deadline) : null,
+        isActive: isActive !== undefined ? isActive : undefined
+      }
+    });
+    res.json({ success: true, message: 'Challenge updated successfully!', updated });
+  } catch (error) {
+    console.error('Challenge Update Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+app.get('/api/challenges', verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const userRole = req.user.role;
+
+    if (userRole === 'SUPER_ADMIN' || userRole === 'COLLEGE_ADMIN') {
+      const managedCollege = userRole === 'COLLEGE_ADMIN' ? await prisma.college.findFirst({ where: { adminId: userId } }) : null;
+      const challenges = await prisma.challenge.findMany({
+        where: userRole === 'COLLEGE_ADMIN' && managedCollege ? { collegeId: managedCollege.id } : {},
+        include: { 
+          college: true,
+          submissions: { include: { student: true } }
         },
-        to: [{ email: toEmail, name: toName || toEmail }],
-        subject: subject,
-        htmlContent: htmlContent,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      console.error('Brevo API Failed:', data);
-    } else {
-      console.log('Email sent successfully via Brevo API to:', toEmail);
-    }
-  } catch (error) {
-    console.error('Brevo API Request Error:', error);
-  }
-}
-
-const formatStr = (dateObj) => {
-  const dd = String(dateObj.getDate()).padStart(2, '0');
-  const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
-  const yyyy = dateObj.getFullYear();
-  return `${dd}/${mm}/${yyyy}`;
-};
-
-// ==========================================
-// 1. STATUS CHECK API
-// ==========================================
-app.get('/api/check-status/:regId', async (req, res) => {
-  try {
-    const regIdToCheck = req.params.regId.replace(/-/g, '').toUpperCase();
-    const spreadsheetId = process.env.SPREADSHEET_ID;
-
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
-
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: 'Form Responses 1!A:L',
-    });
-
-    const rows = response.data.values;
-    if (!rows || rows.length === 0) return res.status(404).json({ success: false, message: 'No data found' });
-
-    let userFound = false;
-    let isCompleted = false;
-    let userData = {};
-
-    for (let i = 1; i < rows.length; i++) {
-      const row = rows[i];
-      if (row[5] && row[5].replace(/-/g, '').toUpperCase() === regIdToCheck) {
-        userFound = true;
-        const taskStatus = row[6] ? row[6].toString().trim().toLowerCase() : '';
-        if (taskStatus === 'done') isCompleted = true;
-
-        const rawCertId = row[10] ? row[10].toString().trim() : '';
-        const validCertId = rawCertId.startsWith('VTCC') ? rawCertId : '';
-
-        userData = {
-          name: row[1],
-          email: row[2],
-          domain: row[4],
-          status: taskStatus,
-          duration: row[7] || '1 Month',
-          startDate: row[8] || '',
-          endDate: row[9] || '',
-          certId: validCertId,
-          issueDate: row[11] || '',
-        };
-        break;
-      }
-    }
-
-    if (!userFound) return res.status(404).json({ success: false, message: 'Registration ID not found.' });
-    return res.json({ success: true, isCompleted, message: isCompleted ? 'Internship Completed!' : 'Tasks Pending', user: userData });
-  } catch (error) {
-    console.error('Check Status Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ==========================================
-// 2. SECURE CREATE ORDER API (UPDATED FOR FREE DIGITAL CERTIFICATE)
-// ==========================================
-app.post('/api/create-order', async (req, res) => {
-  try {
-    const { regId, deliveryOption } = req.body;
-    const cleanRegId = regId.replace(/-/g, '').toUpperCase();
-
-    if (deliveryOption === 'digital' || !deliveryOption) {
-      return res.json({ success: true, isFree: true, message: 'Digital certificate is free!' });
-    }
-
-    const spreadsheetId = process.env.SPREADSHEET_ID;
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
-    const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Form Responses 1!A:J' });
-    const rows = response.data.values;
-
-    let userDuration = '1 Month';
-    let userFound = false;
-
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][5] && rows[i][5].replace(/-/g, '').toUpperCase() === cleanRegId) {
-        userDuration = rows[i][7] || '1 Month';
-        userFound = true;
-        break;
-      }
-    }
-
-    if (!userFound) return res.status(404).json({ success: false, message: 'User not found' });
-
-    let finalAmount = 299;
-    if (userDuration.includes('3')) {
-      finalAmount = 450;
-    } else if (userDuration.includes('6')) {
-      finalAmount = 700;
-    } else {
-      finalAmount = 299;
-    }
-
-    const options = {
-      amount: finalAmount * 100,
-      currency: 'INR',
-      receipt: `receipt_${cleanRegId}`,
-    };
-    const order = await razorpay.orders.create(options);
-    if (!order) return res.status(500).json({ success: false, message: 'Order creation failed' });
-
-    res.json({ success: true, isFree: false, order });
-  } catch (error) {
-    console.error('Secure Order Creation Error:', error);
-    res.status(500).json({ success: false, message: 'Server error during payment creation' });
-  }
-});
-
-// ==========================================
-// 3. PAYMENT VERIFY / CLAIM FREE CERTIFICATE API
-// ==========================================
-app.post('/api/verify-payment', async (req, res) => {
-  try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, regId, deliveryOption, address, isFree } = req.body;
-    const cleanRegId = regId.replace(/-/g, '').toUpperCase();
-
-    const spreadsheetId = process.env.SPREADSHEET_ID;
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
-
-    const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Form Responses 1!A:L' });
-    const rows = response.data.values;
-    let rowIndex = -1;
-    let existingCertId = '';
-
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][5] && rows[i][5].replace(/-/g, '').toUpperCase() === cleanRegId) {
-        rowIndex = i + 1;
-        existingCertId = rows[i][10] || '';
-        break;
-      }
-    }
-
-    if (rowIndex === -1) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    if (existingCertId && existingCertId.trim() !== '') {
-      return res.json({ success: true, message: 'Existing ID used.', certId: existingCertId, issueDate: rows[rowIndex - 1][11] });
-    }
-
-    if (isFree || deliveryOption === 'digital') {
-      const year = new Date().getFullYear().toString().slice(-2);
-      const random6Digits = Math.floor(100000 + Math.random() * 900000);
-      const newCertId = `VTCC${year}${random6Digits}`;
-
-      const internshipEndDate = rows[rowIndex - 1][9];
-      const issueDate = internshipEndDate ? internshipEndDate : new Date().toLocaleDateString('en-GB');
-
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `Form Responses 1!K${rowIndex}:L${rowIndex}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[newCertId, issueDate]] },
+        orderBy: { createdAt: 'desc' }
       });
-
-      return res.json({ success: true, message: 'Free Digital Certificate Claimed!', certId: newCertId, issueDate });
+      return res.json({ success: true, challenges });
     }
 
-    const body = razorpay_order_id + '|' + razorpay_payment_id;
-    const expectedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(body.toString()).digest('hex');
-
-    if (expectedSignature === razorpay_signature) {
-      const year = new Date().getFullYear().toString().slice(-2);
-      const random6Digits = Math.floor(100000 + Math.random() * 900000);
-      const newCertId = `VTCC${year}${random6Digits}`;
-
-      const internshipEndDate = rows[rowIndex - 1][9];
-      const issueDate = internshipEndDate ? internshipEndDate : new Date().toLocaleDateString('en-GB');
-
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `Form Responses 1!K${rowIndex}:L${rowIndex}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[newCertId, issueDate]] },
+    const student = await prisma.student.findUnique({ where: { userId } });
+    if (!student || !student.isApproved) {
+      const challenges = await prisma.challenge.findMany({ 
+        where: { collegeId: null }, 
+        include: { college: true, submissions: true }, 
+        orderBy: { createdAt: 'desc' } 
       });
-
-      const studentName = rows[rowIndex - 1][1];
-      const studentEmail = rows[rowIndex - 1][2];
-      const studentPhone = rows[rowIndex - 1][3];
-      const studentDomain = rows[rowIndex - 1][4];
-
-      const adminHtml = `
-        <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-          <h2 style="color: #2563EB;">New Printed Certificate Order! 🚀</h2>
-          <p>A student has successfully paid for a <strong>Printed + Courier</strong> certificate.</p>
-          <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #2563EB; margin: 20px 0;">
-            <p><strong>Name:</strong> ${studentName}</p>
-            <p><strong>Email:</strong> ${studentEmail}</p>
-            <p><strong>Phone (WhatsApp):</strong> ${studentPhone}</p>
-            <p><strong>Registration ID:</strong> ${cleanRegId}</p>
-            <p><strong>Domain:</strong> ${studentDomain}</p>
-            <p><strong>Delivery Address:</strong><br><span style="color: #1e40af; font-size: 16px;">${address || 'Address not provided'}</span></p>
-          </div>
-          <p>Please dispatch the printed certificate to the above address.</p>
-        </div>
-      `;
-
-      sendBrevoEmail(
-        'velystratechnology@gmail.com',
-        'Velystra Admin',
-        `📦 NEW PRINTED CERTIFICATE ORDER: ${cleanRegId}`,
-        adminHtml
-      );
-
-      res.json({ success: true, message: 'Payment verified!', certId: newCertId, issueDate });
-    } else {
-      res.status(400).json({ success: false, message: 'Invalid Signature.' });
-    }
-  } catch (error) {
-    console.error('Payment Verify Error:', error);
-    res.status(500).json({ success: false, message: 'Verification Error' });
-  }
-});
-
-// ==========================================
-// 4. APPLICATION FORM API (MANUAL APPROVAL SYSTEM)
-// ==========================================
-app.post('/api/apply', async (req, res) => {
-  try {
-    const { name, email, whatsapp, domain, duration } = req.body;
-
-    let prefix = 'VTXX';
-    if (domain === 'Frontend Development') prefix = 'VTFE';
-    else if (domain === 'Backend Development') prefix = 'VTBE';
-    else if (domain === 'Full Stack Development') prefix = 'VTFS';
-
-    const currentYearStr = new Date().getFullYear().toString().slice(-2);
-    const random6Digits = Math.floor(100000 + Math.random() * 900000);
-    const regId = `${prefix}${currentYearStr}${random6Digits}`;
-
-    const startDateObj = new Date();
-    startDateObj.setDate(startDateObj.getDate() + 7);
-
-    const durationMonths = parseInt(duration) || 1; 
-    const endDateObj = new Date(startDateObj);
-    endDateObj.setMonth(endDateObj.getMonth() + durationMonths);
-
-    const startDate = formatStr(startDateObj);
-    const endDate = formatStr(endDateObj);
-    const timestamp = new Date().toLocaleString('en-GB');
-
-    const spreadsheetId = process.env.SPREADSHEET_ID;
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: 'Form Responses 1!A:A',
-      valueInputOption: 'USER_ENTERED',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [[timestamp, name, email, whatsapp, domain, regId, 'Pending Approval', duration, startDate, endDate]] },
-    });
-
-    // 📩 NOTIFY ADMIN (SAHIL) TO APPROVE
-    const adminApprovalUrl = `https://velystra-backend.onrender.com/api/approve-application?regId=${regId}`;
-    const adminHtml = `
-      <div style="font-family: Arial, sans-serif; padding: 20px; color: #333; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 10px;">
-        <h2 style="color: #2563EB;">New Internship Application! 🚀</h2>
-        <p>A new student has applied and is waiting for your approval.</p>
-        <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #2563EB; margin: 20px 0;">
-          <p><strong>Name:</strong> ${name}</p>
-          <p><strong>Email:</strong> ${email}</p>
-          <p><strong>WhatsApp:</strong> ${whatsapp}</p>
-          <p><strong>Domain:</strong> ${domain}</p>
-          <p><strong>Registration ID:</strong> ${regId}</p>
-        </div>
-        <p style="text-align: center; margin: 30px 0;">
-          <a href="${adminApprovalUrl}" style="background: #16A34A; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
-            ✅ Click Here to Approve & Send Offer Letter
-          </a>
-        </p>
-      </div>
-    `;
-
-    sendBrevoEmail(
-      'sahilshaikh0729@gmail.com',
-      'Sahil Shaikh',
-      `🔔 New Application Approval Needed: ${name} (${regId})`,
-      adminHtml
-    );
-
-    res.json({ success: true, message: 'Application Submitted!', data: { regId } });
-  } catch (error) {
-    console.error('Apply API Error:', error);
-    res.status(500).json({ success: false, message: 'Server Error' });
-  }
-});
-
-// ==========================================
-// 4.1 ADMIN APPROVAL ENDPOINT (1-CLICK APPROVAL)
-// ==========================================
-app.get('/api/approve-application', async (req, res) => {
-  try {
-    const { regId } = req.query;
-    if (!regId) return res.status(400).send('Missing Registration ID');
-
-    const cleanRegId = regId.replace(/-/g, '').toUpperCase();
-    const spreadsheetId = process.env.SPREADSHEET_ID;
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
-
-    const response = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Form Responses 1!A:N' });
-    const rows = response.data.values;
-    let rowIndex = -1;
-    let student = {};
-
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][5] && rows[i][5].replace(/-/g, '').toUpperCase() === cleanRegId) {
-        rowIndex = i + 1;
-        student = {
-          name: rows[i][1],
-          email: rows[i][2],
-          domain: rows[i][4],
-          duration: rows[i][7] || '1 Month',
-          startDate: rows[i][8],
-          endDate: rows[i][9],
-        };
-        break;
-      }
+      return res.json({ success: true, challenges, isApproved: false });
     }
 
-    if (rowIndex === -1) return res.status(404).send('Student not found in database.');
-
-    await sheets.spreadsheets.values.update({
-      spreadsheetId,
-      range: `Form Responses 1!G${rowIndex}`,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values: [['Pending']] },
+    const challenges = await prisma.challenge.findMany({
+      where: { OR: [{ collegeId: null }, { collegeId: student.collegeId }] },
+      include: { college: true, submissions: true },
+      orderBy: { createdAt: 'desc' }
     });
 
-    const userEmailHtml = `
-    <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden;">
-        <div style="background-color: #0A192F; padding: 20px; text-align: center;">
-            <h1 style="color: #ffffff; margin: 0;">Velystra Technology</h1>
-        </div>
-        <div style="padding: 30px;">
-            <h2 style="color: #0A192F;">Hi ${student.name},</h2>
-            <p>Congratulations! Your application has been reviewed and approved. We are thrilled to welcome you to the <strong>${student.domain}</strong> internship program at Velystra Technology.</p>
-        
-        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; border-left: 5px solid #0A192F; margin: 25px 0;">
-            <p style="margin: 5px 0;"><strong>Registration ID:</strong> <span style="font-family: monospace; font-size: 16px; color: #d97706;">${cleanRegId}</span></p>
-            <p style="margin: 5px 0;"><strong>Internship Duration:</strong> ${student.duration}</p>
-            <p style="margin: 5px 0;"><strong>Start Date:</strong> ${student.startDate}</p>
-            <p style="margin: 5px 0;"><strong>End Date:</strong> ${student.endDate}</p>
-        </div>
-
-            <p>To officially commence your journey, please download your official offer letter using the link below:</p>
-        
-        <div style="text-align: center; margin: 30px 0;">
-            <a href="https://velystra-technology.vercel.app/offer-letter?regId=${cleanRegId}" 
-            style="background: #2563EB; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
-            📥 Download Official Offer Letter
-            </a>
-        </div>
-
-            <p>Please keep your <strong>Registration ID</strong> safe for all task submissions.</p>
-            <p>Best regards,<br><strong>Team Velystra Technology</strong></p>
-        </div>
-    </div>
-    `;
-
-    sendBrevoEmail(student.email, student.name, 'Official Internship Offer Letter - Velystra Technology', userEmailHtml);
-
-    res.send(`
-      <div style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-        <h1 style="color: #16A34A;">Application Approved Successfully! 🎉</h1>
-        <p>Offer letter has been dispatched to <strong>${student.email}</strong> for <strong>${student.name}</strong>.</p>
-        <p>You can close this tab now.</p>
-      </div>
-    `);
+    res.json({ success: true, challenges, isApproved: true });
   } catch (error) {
-    console.error('Approval Error:', error);
-    res.status(500).send('Internal Server Error during approval.');
+    console.error('Fetch Challenges Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
 
-// ==========================================
-// 5. DAILY CRON JOB (EMAILS VIA BREVO API)
-// ==========================================
-cron.schedule('0 8 * * *', async () => {
-  console.log('Running Daily Email Automation Check...');
+// ================= SMART SUBMISSIONS & HISTORY =================
+app.post('/api/submissions', verifyToken, async (req, res) => {
   try {
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId: process.env.SPREADSHEET_ID,
-      range: 'Form Responses 1!A:N',
+    const { challengeId, githubUrl, deployedUrl } = req.body;
+    const student = await prisma.student.findUnique({ where: { userId: req.user.userId } });
+    if (!student || !student.isApproved) return res.status(403).json({ success: false, message: 'PRN must be approved first.' });
+
+    const existing = await prisma.submission.findFirst({
+      where: { studentId: student.id, challengeId }
     });
 
-    const rows = response.data.values;
-    if (!rows || rows.length === 0) return;
-
-    const todayObj = new Date();
-    const todayStr = formatStr(todayObj);
-
-    const threeDaysLaterObj = new Date(todayObj);
-    threeDaysLaterObj.setDate(todayObj.getDate() + 3);
-    const reminderDateStr = formatStr(threeDaysLaterObj);
-
-    for (let i = 1; i < rows.length; i++) {
-      const name = rows[i][1];
-      const email = rows[i][2];
-      const regId = rows[i][5];
-      const startDate = rows[i][8];
-      const endDate = rows[i][9];
-
-      if (startDate === todayStr) {
-        sendBrevoEmail(
-          email,
-          name,
-          '🚀 Your Velystra Internship Starts Today!',
-          `<p>Hi ${name},</p><p>Welcome aboard! Your internship officially begins today. Keep an eye on your dashboard/tasks.</p>`
-        );
+    if (existing) {
+      if (existing.status === 'APPROVED') {
+        return res.status(400).json({ success: false, message: 'Points already awarded! Please try other events.' });
       }
-
-      if (endDate === reminderDateStr) {
-        sendBrevoEmail(
-          email,
-          name,
-          '⏳ Reminder: 3 Days Left for Submission!',
-          `<p>Hi ${name},</p><p>Your internship end date is approaching on <strong>${endDate}</strong>. Please ensure all tasks are submitted to be eligible for your certificate.</p>`
-        );
+      if (existing.status === 'PENDING') {
+        return res.status(400).json({ success: false, message: 'Your submission is already pending review.' });
       }
-
-      const status = rows[i][6] ? rows[i][6].toString().trim().toLowerCase() : '';
-      const emailSentFlag = rows[i][13] ? rows[i][13].toString().trim() : '';
-
-      if (status === 'done' && emailSentFlag !== 'Sent') {
-        const certHtml = `
-          <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-            <h2 style="color: #16A34A;">Congratulations, ${name}! 🎉</h2>
-            <p>Great news! Your internship tasks at <strong>Velystra Technology</strong> have been reviewed and marked as <strong>Completed</strong>.</p>
-            <p>You can now visit our website, enter your Registration ID (<strong>${regId}</strong>), and unlock/download your official certificate for free.</p>
-            <p>Best Regards,<br><strong>Team Velystra Technology</strong></p>
-          </div>
-        `;
-
-        sendBrevoEmail(
-          email,
-          name,
-          '🎓 Congratulations! Your Internship Certificate is Ready',
-          certHtml
-        );
-
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: process.env.SPREADSHEET_ID,
-          range: `Form Responses 1!N${i + 1}`,
-          valueInputOption: 'USER_ENTERED',
-          requestBody: { values: [['Sent']] },
+      if (existing.status === 'REJECTED') {
+        const updated = await prisma.submission.update({
+          where: { id: existing.id },
+          data: { githubUrl, deployedUrl, status: 'PENDING', feedback: null }
         });
+        return res.json({ success: true, message: 'Re-submitted successfully! Pending review. ⏳', submission: updated });
       }
     }
+
+    const submission = await prisma.submission.create({ data: { studentId: student.id, challengeId, githubUrl, deployedUrl, status: 'PENDING', scoreAwarded: 0 } });
+    res.json({ success: true, message: 'Submitted successfully! ⏳', submission });
   } catch (error) {
-    console.error('Cron Job Error:', error);
+    console.error('Submission Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
 
-// ==========================================
-// 6. TASK SUBMISSION API
-// ==========================================
-app.post('/api/submit-task', async (req, res) => {
+app.get('/api/admin/submissions', verifyToken, verifyCollegeAdmin, async (req, res) => {
   try {
-    const { regId, taskLink } = req.body;
-    const cleanRegId = regId.replace(/-/g, '').toUpperCase();
-
-    const spreadsheetId = process.env.SPREADSHEET_ID;
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
-
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: 'Form Responses 1!A:M',
-    });
-
-    const rows = response.data.values;
-    if (!rows || rows.length === 0) return res.status(404).json({ success: false, message: 'Database empty' });
-
-    let rowIndex = -1;
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][5] && rows[i][5].replace(/-/g, '').toUpperCase() === cleanRegId) {
-        rowIndex = i + 1;
-        break;
-      }
+    let whereCondition = { status: 'PENDING' };
+    if (req.user.role === 'COLLEGE_ADMIN') {
+      whereCondition.student = { collegeId: req.managedCollegeId };
     }
-
-    if (rowIndex !== -1) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `Form Responses 1!G${rowIndex}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [['Review Pending']] },
-      });
-
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `Form Responses 1!M${rowIndex}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[taskLink]] },
-      });
-
-      res.json({ success: true, message: 'Task submitted successfully! Our team will review it soon.' });
-    } else {
-      res.status(404).json({ success: false, message: 'Registration ID not found. Please check and try again.' });
-    }
+    const submissions = await prisma.submission.findMany({ where: whereCondition, include: { challenge: true, student: { include: { college: true } } } });
+    res.json({ success: true, submissions });
   } catch (error) {
-    console.error('Task Submit Error:', error);
-    res.status(500).json({ success: false, message: 'Server error during submission.' });
+    console.error('Submissions Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
 
-// ==========================================
-// 7. CERTIFICATE VALIDATION API
-// ==========================================
-app.get('/api/validate/:certId', async (req, res) => {
+app.post('/api/admin/submissions/:id/approve', verifyToken, verifyCollegeAdmin, async (req, res) => {
   try {
-    const certIdToCheck = req.params.certId.replace(/-/g, '').toUpperCase();
-    const spreadsheetId = process.env.SPREADSHEET_ID;
+    const sub = await prisma.submission.findUnique({ where: { id: req.params.id }, include: { challenge: true } });
+    const updated = await prisma.submission.update({ where: { id: req.params.id }, data: { status: 'APPROVED', scoreAwarded: sub.challenge.points } });
+    await prisma.student.update({ where: { id: sub.studentId }, data: { campusScore: { increment: sub.challenge.points } } });
+    res.json({ success: true, message: 'Approved!', updated });
+  } catch (error) {
+    console.error('Approve Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
 
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
+app.post('/api/admin/submissions/:id/reject', verifyToken, verifyCollegeAdmin, async (req, res) => {
+  try {
+    const { feedback } = req.body;
+    const updated = await prisma.submission.update({
+      where: { id: req.params.id },
+      data: { status: 'REJECTED', feedback: feedback || 'Submission rejected by admin.' }
+    });
+    res.json({ success: true, message: 'Submission rejected with feedback.', updated });
+  } catch (error) {
+    console.error('Reject Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
 
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: 'Form Responses 1!A:L',
+// Student Stats & Points History
+app.get('/api/student/stats', verifyToken, async (req, res) => {
+  try {
+    const student = await prisma.student.findUnique({
+      where: { userId: req.user.userId },
+      include: {
+        submissions: {
+          include: { challenge: true }
+        }
+      }
     });
 
-    const rows = response.data.values;
-    if (!rows || rows.length === 0) return res.status(404).json({ success: false, message: 'Database empty' });
+    if (!student) return res.status(404).json({ success: false, message: 'Student not found.' });
 
-    let userFound = false;
-    let userData = {};
+    let collegePoints = 0;
+    let publicPoints = 0;
 
-    for (let i = 1; i < rows.length; i++) {
-      const row = rows[i];
-      if (row[10] && row[10].toString().trim().toUpperCase() === certIdToCheck) {
-        userFound = true;
-        userData = {
-          name: row[1],
-          domain: row[4],
-          regId: row[5],
-          duration: row[7] || '',
-          startDate: row[8] || '',
-          endDate: row[9] || '',
-          certId: row[10] || '',
-          issueDate: row[11] || '',
-        };
-        break;
+    student.submissions.forEach(sub => {
+      if (sub.status === 'APPROVED') {
+        if (sub.challenge.collegeId !== null) {
+          collegePoints += sub.scoreAwarded;
+        } else {
+          publicPoints += sub.scoreAwarded;
+        }
       }
+    });
+
+    res.json({ success: true, student, collegePoints, publicPoints, submissions: student.submissions });
+  } catch (error) {
+    console.error('Student Stats Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ================= LEADERBOARD (Global & College Specific with Tie-Breaker) =================
+app.get('/api/leaderboard', verifyToken, async (req, res) => {
+  try {
+    const { type } = req.query; // 'college' or 'global'
+    const user = req.user;
+
+    let whereCondition = {};
+    if (type === 'college' && user.role === 'STUDENT') {
+      const student = await prisma.student.findUnique({ where: { userId: user.userId } });
+      if (student) whereCondition.collegeId = student.collegeId;
+    } else if (user.role === 'COLLEGE_ADMIN') {
+      const managedCollege = await prisma.college.findFirst({ where: { adminId: user.userId } });
+      if (managedCollege) whereCondition.collegeId = managedCollege.id;
     }
 
-    if (!userFound) return res.status(404).json({ success: false, message: 'Invalid Certificate ID. Not found in our records.' });
-    return res.json({ success: true, message: 'Certificate is Valid and Verified! ✅', user: userData });
+    // Fetch students sorted by total campusScore (College + Public combined points)
+    const rawLeaderboard = await prisma.student.findMany({
+      where: whereCondition,
+      orderBy: [
+        { campusScore: 'desc' }, // 1st Priority: Highest Combined Score
+        { createdAt: 'asc' }     // 2nd Priority (Tie-Breaker): Earliest registration
+      ],
+      take: 20, // Top 20 for global excitement
+      include: { 
+        college: { select: { name: true, city: true } },
+        submissions: { include: { challenge: true } } // Include submissions to split stats if needed
+      },
+    });
+
+    // Format data to include split points (College Points vs Public Points) for transparency
+    const leaderboard = rawLeaderboard.map(student => {
+      let collegePoints = 0;
+      let publicPoints = 0;
+
+      student.submissions.forEach(sub => {
+        if (sub.status === 'APPROVED') {
+          if (sub.challenge.collegeId !== null) {
+            collegePoints += sub.scoreAwarded;
+          } else {
+            publicPoints += sub.scoreAwarded;
+          }
+        }
+      });
+
+      return {
+        id: student.id,
+        fullName: student.fullName,
+        avatarUrl: student.avatarUrl,
+        domain: student.domain,
+        campusScore: student.campusScore, // Total Score
+        collegePoints,
+        publicPoints,
+        college: student.college
+      };
+    });
+
+    res.json({ success: true, leaderboard });
   } catch (error) {
-    console.error('Validate Error:', error);
-    res.status(500).json({ success: false, message: 'Server error during validation' });
+    console.error('Leaderboard Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ================= FORGOT PASSWORD =================
+app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Email not registered in the system.' });
+    }
+
+    const tempPassword = Math.random().toString(36).slice(-8);
+    const passwordHash = await bcrypt.hash(tempPassword, await bcrypt.genSalt(10));
+    await prisma.user.update({ where: { email }, data: { passwordHash } });
+
+    try {
+      await sendBrevoEmail(
+        email, 
+        user.name, 
+        'Password Reset - Velystra Technology', 
+        `<p>Hello ${user.name},</p><p>Your temporary password is: <strong>${tempPassword}</strong></p><p>Please login and update your password immediately.</p>`
+      );
+    } catch (emailErr) {
+      console.error('Brevo Email Send Error:', emailErr);
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Password reset successful! A temporary password has been sent to your registered email.'
+    });
+  } catch (error) {
+    console.error('Forgot Password Error:', error);
+    res.status(500).json({ success: false, message: 'Server error during password reset.' });
+  }
+});
+
+// ================= PUBLIC STUDENT PROFILE VIEW =================
+app.get('/api/student/:id/profile', async (req, res) => {
+  try {
+    const student = await prisma.student.findUnique({
+      where: { id: req.params.id },
+      include: {
+        college: true,
+        submissions: { where: { status: 'APPROVED' }, include: { challenge: true } }
+      }
+    });
+
+    if (!student) return res.status(404).json({ success: false, message: 'Student not found.' });
+
+    res.json({ success: true, student });
+  } catch (error) {
+    console.error('Public Profile Error:', error);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Backend Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Backend Server running on port ${PORT}`));
