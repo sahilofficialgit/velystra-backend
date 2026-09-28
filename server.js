@@ -230,9 +230,31 @@ app.post('/api/admin/students/:id/approve', verifyToken, verifyCollegeAdmin, asy
   }
 });
 
+app.post('/api/super-admin/colleges/:id/approve', verifyToken, async (req, res) => {
+  if (req.user.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ success: false, message: 'Access denied.' });
+  }
+  await prisma.college.update({
+    where: { id: req.params.id },
+    data: { isVerified: true }
+  });
+  res.json({ success: true, message: 'College approved successfully!' });
+});
+
 // ================= CHALLENGES =================
 app.post('/api/challenges', verifyToken, verifyCollegeAdmin, async (req, res) => {
   try {
+    // 🛑 Check if the college is verified by Super Admin (if it's a college admin creating it)
+    if (req.managedCollegeId) {
+      const college = await prisma.college.findUnique({ where: { id: req.managedCollegeId } });
+      if (!college || !college.isVerified) {
+        return res.status(403).json({ 
+          success: false, 
+          message: 'Your college registration is pending Super Admin verification. You cannot host events yet.' 
+        });
+      }
+    }
+
     const { title, description, points, deadline } = req.body;
     const challenge = await prisma.challenge.create({
       data: { title, description, points: parseInt(points) || 100, deadline: deadline ? new Date(deadline) : null, collegeId: req.managedCollegeId || null, isActive: true }
@@ -247,6 +269,17 @@ app.post('/api/challenges', verifyToken, verifyCollegeAdmin, async (req, res) =>
 
 app.put('/api/admin/challenges/:id', verifyToken, verifyCollegeAdmin, async (req, res) => {
   try {
+    // 🛑 Optional: Check verification for editing too
+    if (req.managedCollegeId) {
+      const college = await prisma.college.findUnique({ where: { id: req.managedCollegeId } });
+      if (!college || !college.isVerified) {
+        return res.status(403).json({ 
+          success: false, 
+          message: 'Your college is pending Super Admin verification.' 
+        });
+      }
+    }
+
     const { title, description, points, deadline, isActive } = req.body;
     const updated = await prisma.challenge.update({
       where: { id: req.params.id },

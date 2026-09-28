@@ -25,16 +25,15 @@ enum Role {
 }
 
 model College {
-  id          String       @id @default(uuid())
-  name        String
-  code        String       @unique // 6-digit unique code for student registration
-  city        String?
-  state       String?
-  adminId     String?      @unique
-  admin       User?        @relation("CollegeAdmin", fields: [adminId], references: [id], onDelete: Cascade)
-  students    Student[]
-  challenges  Challenge[]  // <-- Yeh opposite relation zaroori hai!
-  createdAt   DateTime     @default(now())
+  id           String    @id @default(uuid())
+  name         String    @unique
+  collegeCode  String    @unique // 6-digit code
+  isVerified   Boolean   @default(false) // 👈 NEW: Default unverified until Super Admin approves
+  adminId      String    @unique
+  admin        User      @relation("CollegeAdmin", fields: [adminId], references: [id], onDelete: Cascade)
+  students     Student[]
+  challenges   Challenge[]
+  createdAt    DateTime  @default(now())
 }
 
 model Student {
